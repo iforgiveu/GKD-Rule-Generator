@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GKD Snapshot 规则生成器
 // @namespace    https://i.gkd.li/
-// @version      1.16.0
-// @description  🔆 生成规则复制到剪贴板；🔰 粘贴进所在 app-panel 的编辑框；❌ 清空该编辑框；
+// @version      1.20.0
+// @description  在 i.gkd.li 快照页添加：🔆 生成规则复制到剪贴板；🔰 粘贴进所在 app-panel 的编辑框；❌ 清空该编辑框；🔱 切换 text/desc 匹配模式 + fastQuery 开关（可快速查询的目标不写节点名，弱目标恒写）+ 仅生成 rule 项开关 + 🔀 关系选择器锚点（模拟点击读取锚点真实属性精确归属，目标恒在末尾，弱中间节点折叠为精确深度 >K；跨树追踪拆分为上/下索引：兄侧强锚点 +(m) / 弟侧强锚点 -(m) 跳兄弟后 >K 下行到目标，_pid/index 交叉校验方向）+ 📐 弱目标几何约束开关（默认关；开后仅在存在同名兄弟歧义时追加 width/height，缺失才回退 left/top，保持精简）+ 💭 打开 GKD 匹配符与参数教程（含 action 点击类型与 position 章节）+ 📏 position 生成器（快照图选点生成 action/position 片段，可复制/粘贴进规则编辑框）
 // @match        https://i.gkd.li/snapshot/*
 // @match        https://i.gkd.li/i/*
 // @run-at       document-idle
@@ -10,11 +10,17 @@
 // ==/UserScript==
 (function () {
   'use strict';
-  const BTN_ID = 'gkd-rule-gen-btn';         
+  const BTN_ID = 'gkd-rule-gen-btn'; 
   const BTN_PASTE_ID = 'gkd-rule-paste-btn'; 
   const BTN_CLEAR_ID = 'gkd-rule-clear-btn'; 
-  const BTN_MODE_ID = 'gkd-rule-mode-btn';   
-  const BTN_HELP_ID = 'gkd-rule-help-btn';   
+  const BTN_MODE_ID = 'gkd-rule-mode-btn'; 
+  const BTN_HELP_ID = 'gkd-rule-help-btn'; 
+  const BTN_GEO_ID = 'gkd-rule-geo-btn'; 
+  let selReady = false; 
+  function updateSelState() {
+    selReady = !!readProps();
+    return selReady;
+  }
   function parseVal(raw) {
     if (raw == null) return null;
     const t = raw.trim();
@@ -35,26 +41,27 @@
   }
   const MODE_KEY = 'gkd_match_mode_v1';
   const MODES = [
-    { key: 'exact',  op: '',   label: '精确 =',    tip: '完全等于' },
-    { key: 'contains', op: '*', label: '包含 *=',  tip: '包含该文本' },
+    { key: 'exact', op: '', label: '精确 =', tip: '完全等于' },
+    { key: 'contains', op: '*', label: '包含 *=', tip: '包含该文本' },
     { key: 'startsWith', op: '^', label: '前缀 ^=', tip: '以该文本开头' },
-    { key: 'endsWith',  op: '$', label: '后缀 $=',  tip: '以该文本结尾' },
-    { key: 'regex',  op: '~',  label: '正则 ~=',   tip: 'Java 正则匹配' },
+    { key: 'endsWith', op: '$', label: '后缀 $=', tip: '以该文本结尾' },
+    { key: 'regex', op: '~', label: '正则 ~=', tip: 'Java 正则匹配' },
   ];
   const RELATION_MODES = [
-    { key: 'off',    label: '❌ 关闭',        tip: '不加关系锚点' },
-    { key: 'auto',   label: '🤖 自动兜底',    tip: '无法定位时附加（空 text 触发且保留为约束）' },
-    { key: 'prev',   label: '⬅️ 前兄弟锚点',  tip: '锚点 +(n) 目标' },
-    { key: 'next',   label: '➡️ 后兄弟锚点',  tip: '锚点 -(n) 目标（目标在末尾）' },
-    { key: 'parent', label: '⬆️ 祖先锚点',    tip: '锚点 > 强中间 >K 目标' },
-    { key: 'crossUp',   label: '🔀 跨树·上索引（兄侧）', tip: '前旁支强锚点 +(m) 跳兄弟，目标在末尾' },
+    { key: 'off', label: '❌ 关闭', tip: '不加关系锚点' },
+    { key: 'auto', label: '🤖 自动兜底', tip: '无法定位时附加（空 text 触发且保留为约束）' },
+    { key: 'prev', label: '⬅️ 前兄弟锚点', tip: '锚点 +(n) 目标' },
+    { key: 'next', label: '➡️ 后兄弟锚点', tip: '锚点 -(n) 目标（目标在末尾）' },
+    { key: 'parent', label: '⬆️ 祖先锚点', tip: '锚点 > 强中间 >K 目标' },
+    { key: 'crossUp', label: '🔀 跨树·上索引（兄侧）', tip: '前旁支强锚点 +(m) 跳兄弟，目标在末尾' },
     { key: 'crossDown', label: '🔀 跨树·下索引（弟侧）', tip: '后旁支强锚点 -(m) 跳兄弟，目标在末尾' },
-    { key: 'desc',   label: '⬇️ 后代锚点',    tip: '锚点 <n / <<n 目标（目标在末尾）' },
+    { key: 'desc', label: '⬇️ 后代锚点', tip: '锚点 <n / <<n 目标（目标在末尾）' },
   ];
   let matchMode = { text: 'exact', desc: 'exact' };
   let fastQueryOn = true;
   let ruleOnlyOn = false;
   let relationMode = 'off';
+  let geoOn = false;
   function loadMode() {
     try {
       const raw = localStorage.getItem(MODE_KEY);
@@ -66,6 +73,7 @@
           if (typeof saved.fastQuery === 'boolean') fastQueryOn = saved.fastQuery;
           if (typeof saved.ruleOnly === 'boolean') ruleOnlyOn = saved.ruleOnly;
           if (RELATION_MODES.some(m => m.key === saved.relation)) relationMode = saved.relation;
+          if (typeof saved.geo === 'boolean') geoOn = saved.geo;
         }
       }
     } catch (e) {  }
@@ -73,10 +81,7 @@
   function saveMode() {
     try {
       localStorage.setItem(MODE_KEY, JSON.stringify({
-        ...matchMode,
-        fastQuery: fastQueryOn,
-        ruleOnly: ruleOnlyOn,
-        relation: relationMode,
+        ...matchMode, fastQuery: fastQueryOn, ruleOnly: ruleOnlyOn, relation: relationMode, geo: geoOn,
       }));
     } catch (e) {  }
   }
@@ -160,11 +165,17 @@
       name = t.slice(0, sep).trim();
     } else {
       const m2 = t.match(/:\s(.+)$/);
-      if (m2) { tail = m2[1].trim(); name = t.slice(0, m2.index).trim(); }
+      if (m2) {
+        tail = m2[1].trim();
+        name = t.slice(0, m2.index).trim();
+      }
     }
     let childCount = null;
     const m3 = name.match(/\[(\d+)\]$/);
-    if (m3) { childCount = Number(m3[1]); name = name.slice(0, m3.index).trim(); }
+    if (m3) {
+      childCount = Number(m3[1]);
+      name = name.slice(0, m3.index).trim();
+    }
     return { name, childCount, tail };
   }
   function treeNodeDepth(el) {
@@ -180,6 +191,28 @@
   function isStrongExpr(expr) {
     return /\[(?:vid|id|text|desc)[!~^$*|]?=/.test(expr || '');
   }
+  function hasSameNameSibling() {
+    const sel = document.querySelector('.n-tree-node--selected');
+    if (!sel) return false;
+    const nodes = [...document.querySelectorAll('.n-tree-node')];
+    const i = nodes.indexOf(sel);
+    if (i < 0) return false;
+    const d = treeNodeDepth(sel);
+    const myName = parseNodeLabel(sel.querySelector('.n-tree-node-content__text')?.innerText || '').name;
+    if (!myName) return false;
+    const nameOf = (el) => parseNodeLabel(el.querySelector('.n-tree-node-content__text')?.innerText || '').name;
+    for (let j = i - 1; j >= 0; j--) {
+      const dj = treeNodeDepth(nodes[j]);
+      if (dj < d) break;
+      if (dj === d && nameOf(nodes[j]) === myName) return true;
+    }
+    for (let j = i + 1; j < nodes.length; j++) {
+      const dj = treeNodeDepth(nodes[j]);
+      if (dj < d) break;
+      if (dj === d && nameOf(nodes[j]) === myName) return true;
+    }
+    return false;
+  }
   function getTreeContext() {
     const sel = document.querySelector('.n-tree-node--selected');
     if (!sel) return null;
@@ -191,8 +224,10 @@
     let expect = selDepth - 1;
     for (let i = selIdx - 1; i >= 0 && expect >= 0; i--) {
       const d = treeNodeDepth(nodes[i]);
-      if (d === expect) { ancestors.push(nodeToInfo(nodes[i])); expect--; }
-      else if (d < expect) break;
+      if (d === expect) {
+        ancestors.push(nodeToInfo(nodes[i]));
+        expect--;
+      } else if (d < expect) break;
     }
     const prevSiblings = [];
     for (let i = selIdx - 1; i >= 0; i--) {
@@ -215,10 +250,7 @@
     return {
       self: nodeToInfo(sel),
       selfDepth: selDepth,
-      ancestors,
-      prevSiblings,
-      nextSiblings,
-      descendants,
+      ancestors, prevSiblings, nextSiblings, descendants,
     };
   }
   function buildAnchorExpr(info, props) {
@@ -269,10 +301,9 @@
   async function tryApplyRelation(baseExpr, p, hasRealDistinction) {
     if (relationMode === 'off' || !baseExpr) return null;
     if (relationMode === 'auto' && hasRealDistinction) return null;
-    const ctx = getTreeContext();   
+    const ctx = getTreeContext(); 
     if (!ctx) return null;
-    const parentValid = (info) =>
-      info && (info.nodeId == null || p._pid == null || String(info.nodeId) === String(p._pid));
+    const parentValid = (info) => info && (info.nodeId == null || p._pid == null || String(info.nodeId) === String(p._pid));
     const prevAnchor = async () => {
       const pick = ctx.prevSiblings.find(s => s.tail);
       if (!pick) return null;
@@ -419,8 +450,7 @@
         if (aProps && bProps && aProps._pid != null && bProps._pid != null
           && String(aProps._pid) !== String(bProps._pid)) continue;
         let m = c.m;
-        if (aProps && bProps
-          && typeof aProps.index === 'number' && typeof bProps.index === 'number') {
+        if (aProps && bProps && typeof aProps.index === 'number' && typeof bProps.index === 'number') {
           m = Math.abs(bProps.index - aProps.index);
           const aBefore = aProps.index < bProps.index;
           if (dir === 'up' ? !aBefore : aBefore) continue;
@@ -434,9 +464,7 @@
           for (let t = 1; t < c.k; t++) out += ' <n ' + weakMid(c.up[t].info, null);
           out += ' <n ' + weakMid(aInfo, aProps);
         }
-        const hop = (m === 1
-          ? (dir === 'up' ? ' + ' : ' - ')
-          : ` ${dir === 'up' ? '+' : '-'}(${m}) `);
+        const hop = (m === 1 ? (dir === 'up' ? ' + ' : ' - ') : ` ${dir === 'up' ? '+' : '-'}(${m}) `);
         if (isSelfMount) {
           out += hop + baseExpr;
         } else {
@@ -455,8 +483,8 @@
     if (relationMode === 'crossUp') return await crossTreeAnchor('up');
     if (relationMode === 'crossDown') return await crossTreeAnchor('down');
     return (await prevAnchor()) || (await vertAnchor())
-        || (await crossTreeAnchor('up')) || (await crossTreeAnchor('down'))
-        || (await descAnchor()) || (await nextAnchor());
+      || (await crossTreeAnchor('up')) || (await crossTreeAnchor('down'))
+      || (await descAnchor()) || (await nextAnchor());
   }
   async function buildMatches(p) {
     const parts = [];
@@ -474,10 +502,9 @@
     if (p.text != null) parts.push(buildMatchExpr('text', p.text, matchMode.text));
     if (p.desc != null) parts.push(buildMatchExpr('desc', p.desc, matchMode.desc));
     const hasRealDistinction = !!(
-      p.vid ||
-      p.id ||
-      (p.text && String(p.text) !== '') ||
-      (p.desc && String(p.desc) !== '')
+      p.vid || p.id
+      || (p.text && String(p.text) !== '')
+      || (p.desc && String(p.desc) !== '')
     );
     const base = (shortName ? shortName : '') + parts.join('');
     const weakExpr = () => {
@@ -487,10 +514,23 @@
         if (IDENT_RE.test(t)) s = t;
       }
       const extra = [];
+      if (p.visibleToUser === true) extra.push('[visibleToUser=true]');
+      if (typeof p.index === 'number') extra.push(`[index=${p.index}]`);
       if (p.text === '') extra.push('[text=""]');
       if (p.desc === '') extra.push('[desc=""]');
-      extra.push('[visibleToUser=true]');
-      if (typeof p.index === 'number') extra.push(`[index=${p.index}]`);
+      let geoAdded = false;
+      if (geoOn && hasSameNameSibling()) {
+        if (typeof p.width === 'number') { extra.push(`[width=${p.width}]`); geoAdded = true; }
+        if (typeof p.height === 'number') { extra.push(`[height=${p.height}]`); geoAdded = true; }
+        if (typeof p.width !== 'number' && typeof p.left === 'number') { extra.push(`[left=${p.left}]`); geoAdded = true; }
+        if (typeof p.height !== 'number' && typeof p.top === 'number') { extra.push(`[top=${p.top}]`); geoAdded = true; }
+        if (geoAdded) {
+          console.info('[GKD规则生成器] 检测到同名兄弟歧义，已附加几何约束（width/height 优先，left/top 仅兜底）；几何值随设备分辨率/旋转变化，跨设备使用请手动删改');
+        }
+      }
+      if (p.visibleToUser === false) {
+        console.warn('[GKD规则生成器] 目标节点 visibleToUser=false（快照中不可见），已省略该约束；若规则不触发请改用 clickNode 或重新截图');
+      }
       return s + extra.join('');
     };
     if (relationMode !== 'off') {
@@ -510,7 +550,7 @@
     return texts.find((t) => /^[a-z]+(\.[a-z0-9_]+){1,}$/.test(t)) || '';
   }
   async function buildRule() {
-    const p = readProps();          
+    const p = readProps(); 
     if (!p) return null;
     const activityId = getActivityId();
     const label = p.text || p.desc || (p.name ? p.name.split('.').pop() : '目标控件');
@@ -568,7 +608,7 @@
     } else {
       const pos = Math.min(start, cur.length);
       newText = cur.slice(0, pos) + text + cur.slice(pos);
-      caretPos = pos + text.length;
+      caretPos = pos;
     }
     const proto = Object.getPrototypeOf(ta);
     const desc = Object.getOwnPropertyDescriptor(proto, 'value');
@@ -588,14 +628,24 @@
     const t = document.createElement('div');
     t.textContent = msg;
     t.style.cssText = [
-      'position:fixed', 'z-index:9999999', 'left:50%', 'top:20px',
-      'transform:translateX(-50%)', 'padding:8px 16px',
-      `background:${bg}`, 'color:#fff', 'border-radius:4px',
-      'font-size:13px', 'box-shadow:0 2px 8px rgba(0,0,0,.2)',
-      'transition:opacity .3s', 'pointer-events:none',
+      'position:fixed',
+      'z-index:9999999',
+      'left:50%',
+      'top:20px',
+      'transform:translateX(-50%)',
+      'padding:8px 16px',
+      `background:${bg}`,
+      'color:#fff',
+      'border-radius:4px',
+      'font-size:13px',
+      'box-shadow:0 2px 8px rgba(0,0,0,.2)',
+      'transition:opacity .3s',
+      'pointer-events:none',
     ].join(';');
     document.body.appendChild(t);
-    setTimeout(() => { t.style.opacity = '0'; }, 1500);
+    setTimeout(() => {
+      t.style.opacity = '0';
+    }, 1500);
     setTimeout(() => t.remove(), 1900);
   }
   function removeMenu() {
@@ -610,8 +660,12 @@
   function menuToggleRow(labelText, isOn, onText, offText, onToggle) {
     const row = document.createElement('div');
     row.style.cssText = [
-      'display:flex', 'justify-content:space-between', 'align-items:center',
-      'padding:6px 10px', 'border-radius:4px', 'cursor:pointer',
+      'display:flex',
+      'justify-content:space-between',
+      'align-items:center',
+      'padding:6px 10px',
+      'border-radius:4px',
+      'cursor:pointer',
     ].join(';');
     row.innerHTML = `
       <span style="font-weight:600;">${labelText}</span>
@@ -620,17 +674,18 @@
       </span>`;
     row.addEventListener('mouseenter', () => { row.style.background = '#f3f3f5'; });
     row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
-    row.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onToggle();
-    });
+    row.addEventListener('click', (e) => { e.stopPropagation(); onToggle(); });
     return row;
   }
   function menuOptionRow(selected, labelText, tipText, onSelect) {
     const item = document.createElement('div');
     item.style.cssText = [
-      'padding:6px 10px', 'border-radius:4px', 'cursor:pointer',
-      'display:flex', 'justify-content:space-between', 'align-items:center',
+      'padding:6px 10px',
+      'border-radius:4px',
+      'cursor:pointer',
+      'display:flex',
+      'justify-content:space-between',
+      'align-items:center',
     ].join(';');
     if (selected) {
       item.style.background = '#18a058';
@@ -647,10 +702,7 @@
     right.style.cssText = selected ? 'font-size:11px;opacity:.85;' : 'font-size:11px;color:#999;';
     item.appendChild(left);
     item.appendChild(right);
-    item.addEventListener('click', (e) => {
-      e.stopPropagation();
-      onSelect();
-    });
+    item.addEventListener('click', (e) => { e.stopPropagation(); onSelect(); });
     return item;
   }
   function buildModeMenu(anchor) {
@@ -658,11 +710,19 @@
     const menu = document.createElement('div');
     menu.id = 'gkd-mode-menu';
     menu.style.cssText = [
-      'position:fixed', 'z-index:9999998', 'min-width:230px',
-      'max-height:calc(100vh - 16px)', 'overflow-y:auto', 'overflow-x:hidden',
-      'background:#fff', 'border:1px solid #e0e0e6', 'border-radius:6px',
-      'box-shadow:0 4px 16px rgba(0,0,0,.15)', 'padding:4px',
-      'font-size:13px', 'color:#333',
+      'position:fixed',
+      'z-index:9999998',
+      'min-width:230px',
+      'max-height:calc(100vh - 16px)',
+      'overflow-y:auto',
+      'overflow-x:hidden',
+      'background:#fff',
+      'border:1px solid #e0e0e6',
+      'border-radius:6px',
+      'box-shadow:0 4px 16px rgba(0,0,0,.15)',
+      'padding:4px',
+      'font-size:13px',
+      'color:#333',
     ].join(';');
     const title = document.createElement('div');
     title.textContent = '规则生成器设置';
@@ -677,9 +737,7 @@
       () => {
         fastQueryOn = !fastQueryOn;
         saveMode();
-        toast(fastQueryOn
-          ? '✅ fastQuery 开启：可快速查询的目标不写节点名（弱目标仍写，零损失）'
-          : '✅ fastQuery 关闭：不含 fastQuery，所有目标写节点名');
+        toast(fastQueryOn ? '✅ fastQuery 开启：可快速查询的目标不写节点名（弱目标仍写，零损失）' : '✅ fastQuery 关闭：不含 fastQuery，所有目标写节点名');
         removeMenu();
         updateModeBtnTitle();
         refreshAll();
@@ -693,9 +751,21 @@
       () => {
         ruleOnlyOn = !ruleOnlyOn;
         saveMode();
-        toast(ruleOnlyOn
-          ? '✅ 仅生成 rule 项：输出内层规则对象（key/name/matches/activityIds）'
-          : '✅ 完整规则组：输出含 actionMaximum/fastQuery/rules 的完整对象');
+        toast(ruleOnlyOn ? '✅ 仅生成 rule 项：输出内层规则对象（key/name/matches/activityIds）' : '✅ 完整规则组：输出含 actionMaximum/fastQuery/rules 的完整对象');
+        removeMenu();
+        updateModeBtnTitle();
+        refreshAll();
+      }
+    ));
+    menu.appendChild(menuToggleRow(
+      '📐 弱目标几何约束',
+      geoOn,
+      '✅ 开启（仅同名兄弟歧义时加 w/h）',
+      '⛔ 关闭（精简，只 index 兜底）',
+      () => {
+        geoOn = !geoOn;
+        saveMode();
+        toast(geoOn ? '✅ 几何约束开启：仅当弱目标存在同名兄弟时追加 width/height（缺失才回退 left/top），保持精简' : '✅ 几何约束关闭：弱目标仅 节点名+visibleToUser+index+空串约束，最精简');
         removeMenu();
         updateModeBtnTitle();
         refreshAll();
@@ -755,7 +825,7 @@
     const t = MODES.find(m => m.key === matchMode.text);
     const d = MODES.find(m => m.key === matchMode.desc);
     const r = RELATION_MODES.find(m => m.key === relationMode);
-    btn.title = `生成器设置（点击切换）\ntext: ${t.label} — ${t.tip}\ndesc: ${d.label} — ${d.tip}\nfastQuery: ${fastQueryOn ? '开启（可查目标不写节点名，弱目标恒写）' : '关闭（写节点名）'}\n仅生成 rule 项: ${ruleOnlyOn ? '开启（只输出 rules[0]）' : '关闭（完整规则组）'}\n关系锚点: ${r.label} — ${r.tip}`;
+    btn.title = `生成器设置（点击切换）\ntext: ${t.label} — ${t.tip}\ndesc: ${d.label} — ${d.tip}\nfastQuery: ${fastQueryOn ? '开启（可查目标不写节点名，弱目标恒写）' : '关闭（写节点名）'}\n仅生成 rule 项: ${ruleOnlyOn ? '开启（只输出 rules[0]）' : '关闭（完整规则组）'}\n弱目标几何约束: ${geoOn ? '开启（仅同名兄弟歧义时加 width/height）' : '关闭（精简）'}\n关系锚点: ${r.label} — ${r.tip}`;
   }
   function removeHelp() {
     document.getElementById('gkd-help-panel')?.remove();
@@ -764,25 +834,27 @@
   function buildHelpPanel() {
     removeHelp();
     const CFG = {
-      panelMaxWidth: 1100,        
-      vwPercent: 94,              
-      panelMaxHeightVh: 92,       
-      panelTopVh: 4,              
-      fsTitle: 24,     
-      fsHead: 21,      
-      fsBody: 18,      
-      fsCode: 16,      
-      fsTable: 17,     
-      fsFootnote: 16,  
-      fsLink: 16,      
-      fsCloseBtn: 17,  
-      lhBody: 1.8,     
-      lhPre: 1.7,      
+      panelMaxWidth: 1100,   
+      vwPercent: 94,         
+      panelMaxHeightVh: 92,  
+      panelTopVh: 4,         
+      fsTitle: 24,           
+      fsHead: 21,            
+      fsBody: 18,            
+      fsCode: 16,            
+      fsTable: 17,           
+      fsFootnote: 16,        
+      fsLink: 16,            
+      fsCloseBtn: 17,        
+      lhBody: 1.8,           
+      lhPre: 1.7,            
     };
     const mask = document.createElement('div');
     mask.id = 'gkd-help-mask';
     mask.style.cssText = [
-      'position:fixed', 'inset:0', 'background:rgba(0,0,0,.35)',
+      'position:fixed',
+      'inset:0',
+      'background:rgba(0,0,0,.35)',
       'z-index:9999990',
     ].join(';');
     mask.addEventListener('click', removeHelp);
@@ -790,19 +862,27 @@
     const panel = document.createElement('div');
     panel.id = 'gkd-help-panel';
     panel.style.cssText = [
-      'position:fixed', 'z-index:9999991',
-      `top:${CFG.panelTopVh}vh`, 'left:50%', 'transform:translateX(-50%)',
+      'position:fixed',
+      'z-index:9999991',
+      `top:${CFG.panelTopVh}vh`,
+      'left:50%',
+      'transform:translateX(-50%)',
       `width:min(${CFG.panelMaxWidth}px,${CFG.vwPercent}vw)`,
       `max-height:${CFG.panelMaxHeightVh}vh`,
-      'background:#fff', 'border-radius:10px',
+      'background:#fff',
+      'border-radius:10px',
       'box-shadow:0 8px 32px rgba(0,0,0,.28)',
-      'display:flex', 'flex-direction:column',
+      'display:flex',
+      'flex-direction:column',
       'font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif',
     ].join(';');
     const head = document.createElement('div');
     head.style.cssText = [
-      'padding:16px 20px', 'border-bottom:1px solid #eee',
-      'display:flex', 'align-items:center', 'justify-content:space-between',
+      'padding:16px 20px',
+      'border-bottom:1px solid #eee',
+      'display:flex',
+      'align-items:center',
+      'justify-content:space-between',
       'flex:none',
     ].join(';');
     head.innerHTML = `
@@ -816,14 +896,19 @@
     head.querySelector('#gkd-help-close').addEventListener('click', removeHelp);
     const body = document.createElement('div');
     body.style.cssText = [
-      'padding:16px 22px', 'overflow:auto', 'flex:1', 'min-height:0',
-      `font-size:${CFG.fsBody}px`, `line-height:${CFG.lhBody}`, 'color:#333',
+      'padding:16px 22px',
+      'overflow:auto',
+      'flex:1',
+      'min-height:0',
+      `font-size:${CFG.fsBody}px`,
+      `line-height:${CFG.lhBody}`,
+      'color:#333',
     ].join(';');
     const codeStyle = `background:#f6f6f8;padding:2px 7px;border-radius:3px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:${CFG.fsCode}px;color:#c7254e;`;
-    const preStyle  = `background:#f6f6f8;padding:10px 14px;border-radius:6px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:${CFG.fsCode}px;line-height:${CFG.lhPre};margin:8px 0 12px;white-space:pre;`;
-    const hStyle    = `margin:22px 0 10px;font-size:${CFG.fsHead}px;font-weight:600;color:#18a058;border-bottom:2px solid #18a05833;padding-bottom:5px;`;
-    const tblStyle  = `width:100%;border-collapse:collapse;margin:8px 0 14px;font-size:${CFG.fsTable}px;`;
-    const tdStyle   = 'border:1px solid #eee;padding:8px 12px;vertical-align:top;';
+    const preStyle = `background:#f6f6f8;padding:10px 14px;border-radius:6px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:${CFG.fsCode}px;line-height:${CFG.lhPre};margin:8px 0 12px;white-space:pre;`;
+    const hStyle = `margin:22px 0 10px;font-size:${CFG.fsHead}px;font-weight:600;color:#18a058;border-bottom:2px solid #18a05833;padding-bottom:5px;`;
+    const tblStyle = `width:100%;border-collapse:collapse;margin:8px 0 14px;font-size:${CFG.fsTable}px;`;
+    const tdStyle = 'border:1px solid #eee;padding:8px 12px;vertical-align:top;';
     body.innerHTML = `
       <div style="${hStyle}">1️⃣ 选择器基本结构</div>
       <p>一个选择器由 <b>属性选择器</b> 和 <b>关系选择器</b> 交叉组成，开头/末尾必须是属性选择器，属性选择器与关系选择器之间必须用空格隔开：</p>
@@ -858,14 +943,14 @@
         <tr><td style="${tdStyle}"><code style="${codeStyle}">&lt;&lt;n</code></td><td style="${tdStyle}">A 是 B 的任意层级后代（B 是 A 的祖先）</td><td style="${tdStyle}"><code style="${codeStyle}">@[text='跳过'] &lt;&lt;n [vid='root']</code></td></tr>
       </table>
       <p>支持 <code style="${codeStyle}">&gt;n</code>（任意祖先）、<code style="${codeStyle}">&gt;3</code>、<code style="${codeStyle}">+(2,4,6)</code> 元组等写法，参考 CSS <code style="${codeStyle}">:nth(an+b)</code>。四种关系的官方语义（以 A 在左、B 在右）：</p>
-      <pre style="${preStyle}">A +(an+b) B : A.index = B.index-(an+b)   → A 在 B 前面
-A -(an+b) B : A.index = B.index+(an+b)   → A 在 B 后面
-A &gt; B       : A 是 B 的祖先
-A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
+      <pre style="${preStyle}">A +(an+b) B : A.index = B.index-(an+b) → A 在 B 前面
+A -(an+b) B : A.index = B.index+(an+b) → A 在 B 后面
+A &gt; B : A 是 B 的祖先
+A &lt; B : A 是 B 的直接子节点（且 A.index=0）</pre>
       <p>🔀 本脚本 🔱 菜单的"关系锚点"会自动为目标附加父/兄弟/祖先/后代锚点，生成策略：<b>目标属性选择器恒定在末尾</b>（<code style="${codeStyle}">锚点 +(n) 目标</code> / <code style="${codeStyle}">锚点 -(n) 目标</code> / <code style="${codeStyle}">锚点 &gt; 强中间 &gt;K 目标</code> / <code style="${codeStyle}">锚点 &lt;n·&lt;&lt;n 目标</code>），作为快速查询入口，因此无需 <code style="${codeStyle}">@</code> 标记；锚点属性通过模拟点击读取真实属性表精确归属（vid/desc/text 不再靠猜），读取失败时回退 <code style="${codeStyle}">[vid='x' || text='x' || desc='x']</code> 兜底；含强属性的中间节点保留，仅类名/[childCount] 的弱中间节点折叠为精确深度 <code style="${codeStyle}">&gt;K</code>。</p>
       <p>🔀 v1.15 新增<b>跨树追踪锚点</b>（拆分为上/下索引两方向），专治目标及其祖先全无特征、但旁支子树里存在强节点的场景：设目标在 b 的子树中，强节点在 b 的兄 a 的子树（上索引）或弟 c 的子树（下索引）里，生成——</p>
-      <pre style="${preStyle}">上索引（兄侧）：[强锚点] &lt;n 弱中间… &lt;n a +(m) b &gt;K 目标
-下索引（弟侧）：[强锚点] &lt;n 弱中间… &lt;n c -(m) b &gt;K 目标</pre>
+      <pre style="${preStyle}">上索引（兄侧）：[强锚点] &lt;n 弱中间… &lt;n a +(m) 挂载b &gt;K 目标
+下索引（弟侧）：[强锚点] &lt;n 弱中间… &lt;n c -(m) 挂载b &gt;K 目标</pre>
       <p>其中 m 为 a/c 与 b 的真实兄弟间隔（中间夹的其它兄弟也计入），上下行代差任意（<code style="${codeStyle}">&lt;n</code> 逐级上行 / <code style="${codeStyle}">&gt;K</code> 精确深度下行）；a/b 兄弟关系经点击读取双方 <code style="${codeStyle}">_pid</code>/<code style="${codeStyle}">index</code> 交叉校验，方向不符自动换次优候选；目标恒在末尾，目标自身带 vid/text 时照常享受快速查询，弱目标时 fastQuery 静默回退普通遍历（不报错）。</p>
       <div style="${hStyle}">5️⃣ 常用节点属性</div>
       <table style="${tblStyle}">
@@ -874,19 +959,17 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
         <tr><td style="${tdStyle}"><code style="${codeStyle}">name</code></td><td style="${tdStyle}">string</td><td style="${tdStyle}">Java 类名，如 <code style="${codeStyle}">android.widget.TextView</code></td></tr>
         <tr><td style="${tdStyle}"><code style="${codeStyle}">text</code> / <code style="${codeStyle}">desc</code></td><td style="${tdStyle}">string / null</td><td style="${tdStyle}">文本 / 无障碍描述</td></tr>
         <tr><td style="${tdStyle}"><code style="${codeStyle}">clickable</code> / <code style="${codeStyle}">focusable</code> / <code style="${codeStyle}">checkable</code> / <code style="${codeStyle}">checked</code> / <code style="${codeStyle}">editable</code> / <code style="${codeStyle}">visibleToUser</code></td><td style="${tdStyle}">boolean</td><td style="${tdStyle}">常用布尔特征</td></tr>
-        <tr><td style="${tdStyle}"><code style="${codeStyle}">index</code></td><td style="${tdStyle}">int</td><td style="${tdStyle}">在父节点中的序号（从 0 开始）</td></tr>
+        <tr><td style="${tdStyle}"><code style="${codeStyle}">index</code></td><td style="${tdStyle}">int</td><td style="${tdStyle}">在父节点中的序号（从 0 开始），弱目标兄弟间的主区分手段</td></tr>
         <tr><td style="${tdStyle}"><code style="${codeStyle}">depth</code></td><td style="${tdStyle}">int</td><td style="${tdStyle}">树深度，根节点为 0</td></tr>
         <tr><td style="${tdStyle}"><code style="${codeStyle}">childCount</code></td><td style="${tdStyle}">int</td><td style="${tdStyle}">子节点个数</td></tr>
-        <tr><td style="${tdStyle}"><code style="${codeStyle}">left / top / right / bottom / width / height</code></td><td style="${tdStyle}">int</td><td style="${tdStyle}">位置与尺寸</td></tr>
+        <tr><td style="${tdStyle}"><code style="${codeStyle}">left / top / right / bottom / width / height</code></td><td style="${tdStyle}">int</td><td style="${tdStyle}">位置与尺寸（<b>随设备分辨率/旋转变化</b>；本工具 📐 开关开启且存在同名兄弟歧义时才按快照实值附加 width/height，缺失才回退 left/top）</td></tr>
         <tr><td style="${tdStyle}"><code style="${codeStyle}">parent</code></td><td style="${tdStyle}">node</td><td style="${tdStyle}">父节点，<code style="${codeStyle}">[parent=null]</code> 表示根节点</td></tr>
       </table>
       <div style="${hStyle}">6️⃣ 快速查询</div>
       <p>把规则里 <code style="${codeStyle}">fastQuery</code> 设为 <code style="${codeStyle}">true</code> 后，GKD 可以调用系统 API（findAccessibilityNodeInfosByViewId / ByText）直接查找节点，避免遍历整棵树，速度大幅提升。但要满足：<b>末尾属性选择器的第一个表达式</b>属于下面结构之一：</p>
-      <pre style="${preStyle}">[id='abc']      [vid='abc']
-[text='abc']    [text^='abc']
-[text*='abc']   [text$='abc']</pre>
+      <pre style="${preStyle}">[id='abc']  [vid='abc']  [text='abc']  [text^='abc']  [text*='abc']  [text$='abc']</pre>
       <p>用 <code style="${codeStyle}">||</code> 连接上述结构也算符合。如果末尾选择器不符合这些格式，fastQuery 会被忽略（自动回退普通遍历，不会报错）。另外 vid/id/text 表达式必须放在 <code style="${codeStyle}">[]</code> 内<b>第一个</b>位置：<code style="${codeStyle}">C[id='x'][childCount=2]</code> ✅、<code style="${codeStyle}">C[childCount=2][id='x']</code> ❎。此外 <code style="${codeStyle}">&lt;&lt;n</code> 链条支持分段快速查询（如 <code style="${codeStyle}">C[id='x'] &lt;&lt;n D</code> 会先快速查 C 再在其子树内搜 D）。</p>
-      <p>💡 本脚本的 🔱 菜单"生成内容"分组里有两个开关：<b>⚡ fastQuery</b>——开启时规则组输出 <code style="${codeStyle}">"fastQuery": true</code> 且可快速查询的目标不写节点名（仅空 text 的弱目标仍写节点名，因其无法快速查询，写了零损失）；关闭时不输出 fastQuery，所有目标写节点名简写。<b>🧩 仅生成 rule 项</b>——开启时只输出内层规则对象（key/name/matches/activityIds），适合直接粘进已有规则的 rules 数组；关闭时输出含 actionMaximum/fastQuery/rules 的完整规则组。🔀 所有关系锚点模式（含跨树上/下索引）均把目标放在末尾：目标强则末尾即快速查询入口；跨树模式遇到弱目标时 fastQuery 被静默忽略、回退普通遍历，链本身完全有效。</p>
+      <p>💡 本脚本的 🔱 菜单"生成内容"分组里有三个开关：<b>⚡ fastQuery</b>——开启时规则组输出 <code style="${codeStyle}">"fastQuery": true</code> 且可快速查询的目标不写节点名（仅空 text 的弱目标仍写节点名，因其无法快速查询，写了零损失）；关闭时不输出 fastQuery，所有目标写节点名简写。<b>🧩 仅生成 rule 项</b>——开启时只输出内层规则对象（key/name/matches/activityIds），适合直接粘进已有规则的 rules 数组；关闭时输出含 actionMaximum/fastQuery/rules 的完整规则组。<b>📐 弱目标几何约束</b>（v1.18，默认关）——开启后仅当弱目标存在<b>同名兄弟</b>（同步扫树检测到的真实歧义）时追加 <code style="${codeStyle}">[width=..][height=..]</code>，w/h 缺失才回退 left/top；无同名兄弟时 index 一条即可区分，什么都不加，保持精简。🔀 所有关系锚点模式（含跨树上/下索引）均把目标放在末尾：目标强则末尾即快速查询入口；跨树模式遇到弱目标时 fastQuery 被静默忽略、回退普通遍历，链本身完全有效。</p>
       <div style="${hStyle}">7️⃣ 实战小技巧</div>
       <ul style="margin:6px 0 10px 24px;padding:0;">
         <li>广告"关闭"按钮文字常变化 → 用 <code style="${codeStyle}">[text*='关闭']</code> 或 <code style="${codeStyle}">[text~='关闭(广告|弹窗)?']</code></li>
@@ -929,9 +1012,10 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
 { left: 0, top: 0 }
 { right: 'width*0.1352', top: 'width*0.0852' }
 { x: 'screenWidth/2', y: 'screenHeight/2' }</pre>
-      <p>💡 与本工具的联动：生成器命中的常是大容器（如 <code style="${codeStyle}">[vid='ad_root']</code>），而真正的关闭按钮往往在容器的某个角落且本身无特征——此时不必费力选择更深的子节点，直接在 rules 项里追加 <code style="${codeStyle}">action: 'clickCenter'</code> + <code style="${codeStyle}">position: { right: 'width*0.1', top: 'height*0.1' }</code>（按快照里关闭按钮的实际相对位置调整系数）即可命中角落热区。另一类场景是目标卡片 <code style="${codeStyle}">clickable=false</code>、热区在内部子节点上，用 position 精确点热区可绕过不可点限制。</p>
+      <p>💡 与本工具的联动：生成器命中的常是大容器（如 <code style="${codeStyle}">[vid='ad_root']</code>），而真正的关闭按钮往往在容器的某个角落且本身无特征——此时不必费力选择更深的子节点，直接在 rules 项里追加 <code style="${codeStyle}">action: 'clickCenter'</code> + <code style="${codeStyle}">position: { right: 'width*0.1', top: 'height*0.1' }</code>（按快照里关闭按钮的实际相对位置调整系数）即可命中角落热区。另一类场景是目标卡片 <code style="${codeStyle}">clickable=false</code>、热区在内部子节点上，用 position 精确点热区可绕过不可点限制。本工具新增的 <b>📏 position 生成器</b>（按钮在左侧工具栏 🔱 下方和各面板 🔆 🔰 中间）就是干这个的：点开 📏 出现小面板，把光标移到快照大图目标点上单击，即自动读取悬浮层右下角的归一化坐标（xper/yper）生成 <code style="${codeStyle}">"action": 'clickCenter', "position": { left: 'width*xper', bottom: 'height*yper' }</code> 片段，🖋 复制或 📝 直粘进规则编辑框（已有文本时自动插到 "activityIds" 行之前，夹在 matches 与 activityIds 中间）。</p>
       <div style="margin-top:16px;padding:12px 16px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;font-size:${CFG.fsFootnote}px;color:#555;">
-        📌 以上内容整理自 <a href="https:
+        📌 以上内容整理自
+        <a href="https:
         <a href="https:
         <a href="https:
         <a href="https:
@@ -942,13 +1026,199 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     panel.appendChild(body);
     document.body.appendChild(panel);
   }
+  const GEO_PANEL_ID = 'gkd-geo-panel';
+  let positionText = ''; 
+  let geoDocClickHandler = null;
+  function removeGeoPanel() {
+    document.getElementById(GEO_PANEL_ID)?.remove();
+    if (geoDocClickHandler) {
+      document.removeEventListener('click', geoDocClickHandler, true);
+      geoDocClickHandler = null;
+    }
+  }
+  function findScreenshotImg() {
+    return document.querySelector('img[class*="max-w-[calc"]')
+      || document.querySelector('body > div:nth-child(1) > div > div:nth-child(2) > img')
+      || null;
+  }
+  function readHoverXY() {
+    const overlay = document.querySelector('div.MiniHoverImg.app-panel');
+    if (!overlay) return null;
+    const box = overlay.children[3]; 
+    if (!box) return null;
+    const xRaw = box.children[1]?.innerText?.trim() || '';
+    const yRaw = box.children[2]?.innerText?.trim() || '';
+    const xper = parseFloat(xRaw.split(',')[0]);
+    const yper = parseFloat(yRaw);
+    if (!Number.isFinite(xper) || !Number.isFinite(yper)) return null;
+    return { xper, yper };
+  }
+  function buildPosition(xper, yper) {
+    return `"action": 'clickCenter',\n"position": { left: 'width*${xper}', bottom: 'height*${yper}' },`;
+  }
+  function updateGeoPanelContent() {
+    const pre = document.querySelector(`#${GEO_PANEL_ID} #gkd-geo-bb`);
+    if (!pre) return;
+    pre.textContent = positionText || '（尚未选取坐标：把光标移到快照图上的目标点后单击）';
+  }
+  function pastePositionIntoEditor() {
+    if (!positionText) { toast('⚠️ 尚未生成 position，请先在快照图上选点', 'warn'); return; }
+    const panels = [...document.querySelectorAll('div.app-panel')];
+    const target = panels.find(p => p.innerText.includes('规则静态诊断'))
+      || panels.find(p => p.querySelector(`#${BTN_ID}`));
+    if (!target) { toast('❌ 未找到含「规则静态诊断」的 app-panel', 'err'); return; }
+    const ta = target.querySelector('textarea.n-input__textarea-el');
+    if (!ta) { toast('❌ 该面板内没有编辑框，请先打开编辑界面', 'err'); return; }
+    const cur = ta.value;
+    let newText, caretPos;
+    if (cur.trim() === '') {
+      newText = positionText;
+      caretPos = newText.length;
+    } else {
+      const lines = cur.split('\n');
+      const idx = lines.findIndex(l => l.includes('"activityIds"'));
+      if (idx >= 0) {
+        lines.splice(idx, 0, positionText); 
+        newText = lines.join('\n');
+        let off = 0;
+        for (let i = 0; i < idx; i++) off += lines[i].length + 1;
+        caretPos = off + positionText.length;
+      } else {
+        const start = ta.selectionStart ?? 0;
+        const end = ta.selectionEnd ?? 0;
+        newText = cur.slice(0, start) + positionText + cur.slice(end);
+        caretPos = start + positionText.length;
+      }
+    }
+    const proto = Object.getPrototypeOf(ta);
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(ta, newText);
+    else ta.value = newText;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.dispatchEvent(new Event('change', { bubbles: true }));
+    ta.focus();
+    ta.setSelectionRange(caretPos, caretPos);
+    toast('✅ position 已粘贴进编辑框');
+  }
+  function buildGeoPanel() {
+    removeGeoPanel();
+    const panel = document.createElement('div');
+    panel.id = GEO_PANEL_ID;
+    panel.style.cssText = [
+      'position:fixed',
+      'z-index:9999992',
+      'right:16px',
+      'top:64px',
+      'width:360px',
+      'max-width:92vw',
+      'background:#fff',
+      'border:1px solid #e0e0e6',
+      'border-radius:8px',
+      'box-shadow:0 4px 16px rgba(0,0,0,.15)',
+      'padding:10px 12px',
+      'font-size:13px',
+      'color:#333',
+      'font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif',
+    ].join(';');
+    const head = document.createElement('div');
+    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;';
+    const title = document.createElement('span');
+    title.textContent = '📏 position 生成器';
+    title.style.fontWeight = '600';
+    head.appendChild(title);
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '✕';
+    closeBtn.style.cssText = 'border:none;background:#f3f3f5;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:13px;';
+    closeBtn.addEventListener('click', removeGeoPanel);
+    head.appendChild(closeBtn);
+    panel.appendChild(head);
+    const tip = document.createElement('div');
+    tip.style.cssText = 'color:#888;font-size:12px;margin-bottom:6px;';
+    tip.textContent = '光标移到快照图目标点上单击，自动读取悬浮层坐标生成 position 片段';
+    panel.appendChild(tip);
+    const pre = document.createElement('pre');
+    pre.id = 'gkd-geo-bb';
+    pre.style.cssText = [
+      'background:#f6f6f8',
+      'border-radius:6px',
+      'padding:8px 10px',
+      'white-space:pre-wrap',
+      'word-break:break-all',
+      'margin:0 0 8px',
+      'font-family:ui-monospace,SFMono-Regular,Consolas,monospace',
+      'font-size:13px',
+      'line-height:1.6',
+      'min-height:52px',
+    ].join(';');
+    panel.appendChild(pre);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;';
+    const mkBtn = (txt, bg, fn) => {
+      const b = document.createElement('button');
+      b.textContent = txt;
+      b.style.cssText = `flex:1;border:none;border-radius:4px;padding:6px 0;cursor:pointer;font-size:13px;color:#fff;background:${bg};`;
+      b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+      return b;
+    };
+    row.appendChild(mkBtn('🖋 复制 position', '#18a058', async () => {
+      if (!positionText) { toast('⚠️ 尚未生成 position，请先在快照图上选点', 'warn'); return; }
+      const ok = await copyText(positionText);
+      toast(ok ? '✅ position 已复制到剪贴板' : '❌ 复制失败', ok ? 'ok' : 'err');
+    }));
+    row.appendChild(mkBtn('📝 粘贴到编辑框', '#2080f0', () => pastePositionIntoEditor()));
+    panel.appendChild(row);
+    document.body.appendChild(panel);
+    updateGeoPanelContent();
+    geoDocClickHandler = (e) => {
+      if (e.target.closest(`#${GEO_PANEL_ID}`)) return; 
+      const img = findScreenshotImg();
+      if (!img) return;
+      if (e.target !== img && !img.contains(e.target)) return; 
+      const xy = readHoverXY();
+      if (!xy) { toast('❌ 未能读取悬浮层坐标（MiniHoverImg 不存在或数据缺失）', 'err'); return; }
+      positionText = buildPosition(xy.xper, xy.yper);
+      updateGeoPanelContent();
+      toast(`✅ 已生成 position：xper=${xy.xper} yper=${xy.yper}`);
+    };
+    document.addEventListener('click', geoDocClickHandler, true);
+  }
+  function createGeoBtn() {
+    const btn = document.createElement('button');
+    btn.id = BTN_GEO_ID;
+    btn.type = 'button';
+    btn.title = '📏 position 生成器：在快照图上选点生成 action/position 片段';
+    btn.textContent = '📏';
+    styleBtn(btn);
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      updateSelState();
+      if (!selReady) {
+        toast('⚠️ 请先在左侧快照树中选中一个节点', 'warn');
+        return;
+      }
+      if (document.getElementById(GEO_PANEL_ID)) { removeGeoPanel(); return; }
+      buildGeoPanel();
+    });
+    return btn;
+  }
   function styleBtn(btn) {
     btn.style.cssText = [
-      'width:36px', 'height:36px', 'border:none', 'background:transparent',
-      'font-size:18px', 'line-height:1', 'cursor:pointer', 'border-radius:4px',
-      'opacity:.85', 'transition:opacity .2s, background .2s',
-      'padding:0', 'flex:none', 'display:inline-flex',
-      'align-items:center', 'justify-content:center', 'user-select:none',
+      'width:36px',
+      'height:36px',
+      'border:none',
+      'background:transparent',
+      'font-size:18px',
+      'line-height:1',
+      'cursor:pointer',
+      'border-radius:4px',
+      'opacity:.85',
+      'transition:opacity .2s, background .2s',
+      'padding:0',
+      'flex:none',
+      'display:inline-flex',
+      'align-items:center',
+      'justify-content:center',
+      'user-select:none',
       'margin-left:0',
     ].join(';');
     btn.addEventListener('mouseenter', () => { if (!btn.disabled) btn.style.background = '#f3f3f5'; });
@@ -964,9 +1234,11 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     styleBtn(btn);
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
+      updateSelState();
       const ruleText = await buildRule();
       if (!ruleText) {
         toast('⚠️ 请先在左侧快照树中选中一个节点', 'warn');
+        refreshAll(); 
         return;
       }
       const ok = await copyText(ruleText);
@@ -984,9 +1256,11 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     styleBtn(btn);
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
+      updateSelState();
       const ruleText = await buildRule();
       if (!ruleText) {
         toast('⚠️ 请先在左侧快照树中选中一个节点', 'warn');
+        refreshAll();
         return;
       }
       const panel = btn.closest('div.app-panel');
@@ -1055,7 +1329,10 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const existing = document.getElementById('gkd-mode-menu');
-      if (existing) { removeMenu(); return; }
+      if (existing) {
+        removeMenu();
+        return;
+      }
       buildModeMenu(btn);
     });
     return btn;
@@ -1070,17 +1347,20 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const existing = document.getElementById('gkd-help-panel');
-      if (existing) { removeHelp(); return; }
+      if (existing) {
+        removeHelp();
+        return;
+      }
       buildHelpPanel();
     });
     return btn;
   }
   function refreshAll() {
-    const ready = !!readProps();
-    document.querySelectorAll(`#${BTN_ID}, #${BTN_PASTE_ID}`).forEach((btn) => {
-      btn.disabled = !ready;
-      btn.style.opacity = ready ? '1' : '.35';
-      btn.style.cursor = ready ? 'pointer' : 'not-allowed';
+    updateSelState(); 
+    document.querySelectorAll(`#${BTN_ID}, #${BTN_PASTE_ID}, #${BTN_GEO_ID}`).forEach((btn) => {
+      btn.disabled = !selReady;
+      btn.style.opacity = selReady ? '1' : '.35';
+      btn.style.cursor = selReady ? 'pointer' : 'not-allowed';
     });
     updateModeBtnTitle();
     document.querySelectorAll(`#${BTN_CLEAR_ID}`).forEach((btn) => {
@@ -1106,22 +1386,31 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     } else if (modeBtn.previousElementSibling !== copyBtn) {
       copyBtn.after(modeBtn);
     }
+    let geoBtn = bar.querySelector(`#${BTN_GEO_ID}`);
+    if (!geoBtn) {
+      geoBtn = createGeoBtn();
+      modeBtn.after(geoBtn);
+    } else if (geoBtn.previousElementSibling !== modeBtn) {
+      modeBtn.after(geoBtn);
+    }
     let helpBtn = bar.querySelector(`#${BTN_HELP_ID}`);
     if (!helpBtn) {
       helpBtn = createHelpBtn();
-      modeBtn.after(helpBtn);
-    } else if (helpBtn.previousElementSibling !== modeBtn) {
-      modeBtn.after(helpBtn);
+      geoBtn.after(helpBtn);
+    } else if (helpBtn.previousElementSibling !== geoBtn) {
+      geoBtn.after(helpBtn);
     }
   }
   function injectAppPanels() {
     document.querySelectorAll('div.app-panel').forEach((panel) => {
       const tag = panel.querySelector('div.n-tag');
       const copyBtn = panel.querySelector(`#${BTN_ID}`);
+      const geoBtn = panel.querySelector(`#${BTN_GEO_ID}`);
       const pasteBtn = panel.querySelector(`#${BTN_PASTE_ID}`);
       const clearBtn = panel.querySelector(`#${BTN_CLEAR_ID}`);
       if (!tag) {
         copyBtn?.remove();
+        geoBtn?.remove();
         pasteBtn?.remove();
         clearBtn?.remove();
         return;
@@ -1131,15 +1420,23 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
       } else if (copyBtn.previousElementSibling !== tag) {
         tag.after(copyBtn);
       }
-      if (!pasteBtn) {
-        copyBtn.after(createPasteBtn());
-      } else if (pasteBtn.previousElementSibling !== copyBtn) {
-        copyBtn.after(pasteBtn);
+      const copyEl = panel.querySelector(`#${BTN_ID}`);
+      if (!geoBtn) {
+        copyEl.after(createGeoBtn());
+      } else if (geoBtn.previousElementSibling !== copyEl) {
+        copyEl.after(geoBtn);
       }
+      const geoEl = panel.querySelector(`#${BTN_GEO_ID}`);
+      if (!pasteBtn) {
+        geoEl.after(createPasteBtn());
+      } else if (pasteBtn.previousElementSibling !== geoEl) {
+        geoEl.after(pasteBtn);
+      }
+      const pasteEl = panel.querySelector(`#${BTN_PASTE_ID}`);
       if (!clearBtn) {
-        pasteBtn.after(createClearBtn());
-      } else if (clearBtn.previousElementSibling !== pasteBtn) {
-        pasteBtn.after(clearBtn);
+        pasteEl.after(createClearBtn());
+      } else if (clearBtn.previousElementSibling !== pasteEl) {
+        pasteEl.after(clearBtn);
       }
     });
   }
@@ -1148,6 +1445,23 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     injectAppPanels();
     refreshAll();
   }
+  let injectPending = false;
+  function scheduleInject() {
+    if (injectPending) return;
+    injectPending = true;
+    requestAnimationFrame(() => {
+      injectPending = false;
+      injectAll();
+    });
+  }
+  document.addEventListener('click', (e) => {
+    const t = e.target;
+    if (t.closest?.('.n-tree-node') || t.closest?.('table.n-table')
+      || (t.tagName === 'IMG' || t.closest?.('img'))) {
+      setTimeout(refreshAll, 300);
+      setTimeout(refreshAll, 800);
+    }
+  }, true);
   document.addEventListener('click', (e) => {
     const menu = document.getElementById('gkd-mode-menu');
     if (menu && !menu.contains(e.target) && !e.target.closest(`#${BTN_MODE_ID}`)) {
@@ -1158,12 +1472,13 @@ A &lt; B       : A 是 B 的直接子节点（且 A.index=0）</pre>
     if (e.key === 'Escape') {
       removeMenu();
       removeHelp();
+      removeGeoPanel();
     }
   });
   loadMode(); 
   const boot = () => {
     injectAll();
-    new MutationObserver(() => injectAll()).observe(document.body, {
+    new MutationObserver(() => scheduleInject()).observe(document.body, {
       childList: true,
       subtree: true,
     });
