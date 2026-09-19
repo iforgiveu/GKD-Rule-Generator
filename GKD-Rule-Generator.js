@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         GKD Snapshot 规则生成器
 // @namespace    https://i.gkd.li/
-// @version      1.22.3
-// @description  在 i.gkd.li 快照页添加：🔆 生成规则复制到剪贴板；🔰 粘贴进所在 app-panel 的编辑框；❌ 清空该编辑框；🔱 切换 text/desc 匹配模式 + fastQuery 开关 + 仅生成 rule 项开关 + 🔀 关系选择器锚点（目标恒在末尾，跨树上/下索引）+ 📐 弱目标几何约束开关 + 💭 GKD 匹配符与参数教程 + 📏 position 生成器 + 📍 初始锚点（固定链路起点并高亮）；⚡ v1.22：fastQuery 开启时若目标不可快速查询，自动反转链路——@目标在前、以可快速查询的亲属锚点（vid/id/text，📍 固定锚点优先）收尾作为快速查询入口；🔧 v1.22.1：📍 已设置时 fq 反转绝不自动搜索顶替；🔧 v1.22.2：📍 跨树关系时先尝试整链反转（@目标在前、锚点收尾当 fq 入口，关系符逐段互换：<n⇄>、+(m)⇄-(m)、>K 展开逐级 <n），反转不可行才回退 📍 正向跨树链；🔧 v1.22.3：修复 buildFqCrossChain ③ 段末位与锚点之间漏写 > 关系符的 bug（k≥1 时以 ' > ' 连接锚点，k=0 时 hop 后直接追加）
+// @version      1.22.5
+// @description  在 i.gkd.li 快照页添加：🔆 生成规则复制到剪贴板；🔰 粘贴进所在 app-panel 的编辑框；❌ 清空该编辑框；🔱 切换 text/desc 匹配模式 + fastQuery 开关 + 仅生成 rule 项开关 + 🔀 关系选择器锚点（目标恒在末尾，跨树上/下索引）+ 📐 弱目标几何约束开关 + 🧬 使用 gkd 自生成 selfrule 开关（面板内 🧬 按钮可快速开关，开启时 matches 直接采用点击属性表按钮生成的规则）+ 💭 GKD 匹配符与参数教程 + 📏 position 生成器 + 📍 初始锚点（固定链路起点并高亮）；⚡ v1.22：fastQuery 开启时若目标不可快速查询，自动反转链路——@目标在前、以可快速查询的亲属锚点（vid/id/text，📍 固定锚点优先）收尾作为快速查询入口；🔧 v1.22.1：📍 已设置时 fq 反转绝不自动搜索顶替；🔧 v1.22.2：📍 跨树关系时先尝试整链反转（@目标在前、锚点收尾当 fq 入口，关系符逐段互换：<n⇄>、+(m)⇄-(m)、>K 展开逐级 <n），反转不可行才回退 📍 正向跨树链；🔧 v1.22.3：修复 buildFqCrossChain ③ 段末位与锚点之间漏写 > 关系符的 bug；🔧 v1.22.5：🧬 selfrule 改用启动时装载的永久剪贴板探针（seq 基线判新，无临时装拆），截获文本直接返回；app-panel 内新增 🧬 快速开关按钮（开时绿色高亮，位于 📏 与 🔰 之间）
 // @match        https://i.gkd.li/snapshot/*
 // @match        https://i.gkd.li/i/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
-
 (function () {
   'use strict';
 
@@ -19,6 +18,7 @@
   const BTN_HELP_ID = 'gkd-rule-help-btn'; // 💭
   const BTN_GEO_ID = 'gkd-rule-geo-btn'; // 📏
   const BTN_ANCHOR_ID = 'gkd-rule-anchor-btn'; // 📍
+  const BTN_SELFRULE_ID = 'gkd-rule-selfrule-btn'; // 🧬
   const ANCHOR_HL_CLS = 'gkd-anchor-highlight'; // 📍 锚点高亮类
 
   /* ════════════════════════════════════════════════════════════
@@ -34,7 +34,6 @@
          状态与实际执行永远一致
      ════════════════════════════════════════════════════════════ */
   let selReady = false; // 唯一状态：当前是否选中了带属性表的树节点
-
   function updateSelState() {
     selReady = !!readProps();
     return selReady;
@@ -71,7 +70,7 @@
     return String(s).replace(/\\/g, '\\\\').replace(/`/g, '\\`');
   }
 
-  /* ---------------- 匹配模式 + fastQuery + ruleOnly + relation + geo 开关（🔱 记忆） ---------------- */
+  /* ---------------- 匹配模式 + fastQuery + ruleOnly + relation + geo + selfRule 开关（🔱 记忆） ---------------- */
 
   const MODE_KEY = 'gkd_match_mode_v1';
 
@@ -86,25 +85,25 @@
 
   // 🔀 关系选择器模式
   // ⚡ 设计原则：所有模式目标属性选择器恒定放在选择器末尾（无需 @ 标记）——
-  // GKD 默认取最后一个属性选择器为目标；目标自带 vid/text 时末尾即快速查询入口
-  // （官方 optimize 文档：以「末尾属性选择器的第一个表达式」为入口）：
-  //   prev:  锚点 +(n) 目标 A +(an+b) B : A.index = B.index-(an+b)
-  //   next:  锚点 -(n) 目标 A -(an+b) B : A.index = B.index+(an+b)
-  //   vert:  锚点 > 强中间 >K 目标 : A 是 B 的祖先
-  //   desc:  锚点 <n / <<n 目标 A <(m) B : A 是 B 的直接子节点且 A.index=m-1
-  //          （裸 < 仅匹配首个子节点，任意位置须写 <n）
+  //   GKD 默认取最后一个属性选择器为目标；目标自带 vid/text 时末尾即快速查询入口
+  //   （官方 optimize 文档：以「末尾属性选择器的第一个表达式」为入口）：
+  //   prev: 锚点 +(n) 目标   A +(an+b) B : A.index = B.index-(an+b)
+  //   next: 锚点 -(n) 目标   A -(an+b) B : A.index = B.index+(an+b)
+  //   vert: 锚点 > 强中间 >K 目标 : A 是 B 的祖先
+  //   desc: 锚点 <n / <<n 目标  A <(m) B : A 是 B 的直接子节点且 A.index=m-1
+  //   （裸 < 仅匹配首个子节点，任意位置须写 <n）
   // 跨树追踪（v1.15 拆分为上/下索引两方向）：目标全链无特征、但旁支子树里
-  // 存在强节点时，以旁支强锚点开头、目标恒收尾，上下行代差任意：
+  //   存在强节点时，以旁支强锚点开头、目标恒收尾，上下行代差任意：
   //   crossUp:   强锚点 <n 弱中间… <n a +(m) 挂载b >K 目标（a 是 b 的兄，前旁支）
   //   crossDown: 强锚点 <n 弱中间… <n a -(m) 挂载b >K 目标（a 是 b 的弟，后旁支）
-  // a 是强锚点的祖先/自身，b 是目标的祖先/自身，a 与 b 互为兄弟；
-  // m 为兄弟间隔（中间夹的 x/y 兄弟也计入，其子树强节点同样可作候选）；
-  // 弱目标时 fastQuery 被静默忽略（回退普通遍历，不报错），链本身完全有效
+  //   a 是强锚点的祖先/自身，b 是目标的祖先/自身，a 与 b 互为兄弟；
+  //   m 为兄弟间隔（中间夹的 x/y 兄弟也计入，其子树强节点同样可作候选）；
+  //   弱目标时 fastQuery 被静默忽略（回退普通遍历，不报错），链本身完全有效
   // ⚡ v1.22：fastQuery 开启且目标不可快速查询时，改走「反转链路」逻辑
-  //（@目标在前、fq 锚点收尾），不再强制目标在末尾，见 tryApplyFqEnd；
+  //  （@目标在前、fq 锚点收尾），不再强制目标在末尾，见 tryApplyFqEnd；
   // 🔧 v1.22.1：📍 已设置时 fq 反转的自动搜索被禁用，📍 意图永远最高优先
   // 🔧 v1.22.2：📍 跨树关系时先尝试整链反转成 fq 收尾（buildFqCrossChain），
-  // 反转不可行才回退 📍 正向跨树链（目标收尾），fastQuery 静默忽略
+  //   反转不可行才回退 📍 正向跨树链（目标收尾），fastQuery 静默忽略
   // 🔧 v1.22.3：修复 buildFqCrossChain ③ 段末位与锚点之间漏写 > 的 bug
   const RELATION_MODES = [
     { key: 'off', label: '❌ 关闭', tip: '不加关系锚点' },
@@ -117,12 +116,13 @@
     { key: 'desc', label: '⬇️ 后代锚点', tip: '锚点 <n / <<n 目标（目标在末尾）' },
   ];
 
-  // 默认：text 精确，desc 精确，fastQuery 开启，仅生成 rule 项关闭，关系锚点关闭，几何约束关闭
+  // 默认：text 精确，desc 精确，fastQuery 开启，仅生成 rule 项关闭，关系锚点关闭，几何约束关闭，selfrule 关闭
   let matchMode = { text: 'exact', desc: 'exact' };
   let fastQueryOn = true;
   let ruleOnlyOn = false;
   let relationMode = 'off';
   let geoOn = false;
+  let useSelfRule = false; // 🧬 使用 gkd 自己生成的 selfrule 作为 matches
 
   function loadMode() {
     try {
@@ -136,11 +136,11 @@
           if (typeof saved.ruleOnly === 'boolean') ruleOnlyOn = saved.ruleOnly;
           if (RELATION_MODES.some(m => m.key === saved.relation)) relationMode = saved.relation;
           if (typeof saved.geo === 'boolean') geoOn = saved.geo;
+          if (typeof saved.selfRule === 'boolean') useSelfRule = saved.selfRule;
         }
       }
     } catch (e) { /* 忽略 */ }
   }
-
   function saveMode() {
     try {
       localStorage.setItem(MODE_KEY, JSON.stringify({
@@ -149,6 +149,7 @@
         ruleOnly: ruleOnlyOn,
         relation: relationMode,
         geo: geoOn,
+        selfRule: useSelfRule,
       }));
     } catch (e) { /* 忽略 */ }
   }
@@ -342,6 +343,7 @@
     const selIdx = nodes.indexOf(sel);
     if (selIdx < 0) return null;
     const selDepth = treeNodeDepth(sel);
+
     // 祖先链：从选中节点向上逐级收集（遇虚拟列表截断即停）
     const ancestors = [];
     let expect = selDepth - 1;
@@ -352,6 +354,7 @@
         expect--;
       } else if (d < expect) break;
     }
+
     // 全部前兄弟（由近及远）
     const prevSiblings = [];
     for (let i = selIdx - 1; i >= 0; i--) {
@@ -359,6 +362,7 @@
       if (d < selDepth) break;
       if (d === selDepth) prevSiblings.push(nodeToInfo(nodes[i]));
     }
+
     // 全部后兄弟（由近及远）
     const nextSiblings = [];
     for (let i = selIdx + 1; i < nodes.length; i++) {
@@ -366,6 +370,7 @@
       if (d < selDepth) break;
       if (d === selDepth) nextSiblings.push(nodeToInfo(nodes[i]));
     }
+
     // 全部后代（由近及远）
     const descendants = [];
     for (let i = selIdx + 1; i < nodes.length; i++) {
@@ -373,11 +378,8 @@
       if (d <= selDepth) break;
       descendants.push(nodeToInfo(nodes[i]));
     }
-    return {
-      self: nodeToInfo(sel),
-      selfDepth: selDepth,
-      ancestors, prevSiblings, nextSiblings, descendants,
-    };
+
+    return { self: nodeToInfo(sel), selfDepth: selDepth, ancestors, prevSiblings, nextSiblings, descendants };
   }
 
   // 把树节点信息转成锚点选择器
@@ -458,7 +460,8 @@
     if (!ctx) return null;
 
     // 父节点需与属性表 _pid 交叉校验，防止虚拟列表截断导致认错父级
-    const parentValid = (info) => info && (info.nodeId == null || p._pid == null || String(info.nodeId) === String(p._pid));
+    const parentValid = (info) =>
+      info && (info.nodeId == null || p._pid == null || String(info.nodeId) === String(p._pid));
 
     // ⬅️ 前兄弟：锚点 +(n) 目标 —— 官方语义 A +(an+b) B : A.index = B.index-(an+b)，
     // 即锚点在目标前面第 n 个；优先找最近的带可区分 tail 的兄弟
@@ -563,10 +566,7 @@
         // 祖先链到该深度必须逐级连续（否则下行 >K 会算错层数）
         let contiguous = true;
         for (let d = ctx.selfDepth - 1, t = 0; d >= anc.depth; d--, t++) {
-          if (!ctx.ancestors[t] || ctx.ancestors[t].depth !== d) {
-            contiguous = false;
-            break;
-          }
+          if (!ctx.ancestors[t] || ctx.ancestors[t].depth !== d) { contiguous = false; break; }
         }
         if (contiguous) mounts.push({ info: anc, idx: i, upSteps: ctx.selfDepth - anc.depth });
       }
@@ -607,7 +607,6 @@
         const s = infos[i];
         if (!s.tail) continue;
         if (s.nodeId != null && excluded.has(String(s.nodeId))) continue;
-
         // 向上链：up[0] = s 自身，up[k] = 第 k 级祖先（遇虚拟列表截断即止）
         const up = [{ info: s, idx: i }];
         let expect = s.depth - 1;
@@ -617,7 +616,6 @@
             expect--;
           } else if (infos[j].depth < expect) break;
         }
-
         // 挂载配对：a = s 自身或其祖先，b = 目标自身或其祖先，a 与 b 互为兄弟
         for (let k = 0; k < up.length; k++) {
           const a = up[k];
@@ -657,13 +655,14 @@
         addNeed(aInfo);
         if (!isSelfMount) addNeed(bInfo);
         const pm = await resolveNodeProps(need);
+
         const sProps = sInfo.nodeId != null ? (pm.get(String(sInfo.nodeId)) || null) : null;
         const aProps = aInfo.nodeId != null ? (pm.get(String(aInfo.nodeId)) || null) : null;
         const bProps = isSelfMount ? p : (bInfo.nodeId != null ? (pm.get(String(bInfo.nodeId)) || null) : null);
 
         // 兄弟关系校验：双方 _pid 都已知时必须一致（防虚拟列表截断认错父级）
         if (aProps && bProps && aProps._pid != null && bProps._pid != null &&
-            String(aProps._pid) !== String(bProps._pid)) continue;
+          String(aProps._pid) !== String(bProps._pid)) continue;
 
         // 兄弟间隔：优先用属性表真实 index，并复核方向与模式一致
         let m = c.m;
@@ -677,7 +676,6 @@
 
         const sExpr = buildAnchorExpr(sInfo, sProps);
         if (!sExpr) continue;
-
         // 弱中间节点表达式：简写名 / [name] / childCount / OR 兜底，全无则 *
         const weakMid = (info, props) => buildAnchorExpr(info, props) || '*';
 
@@ -687,10 +685,8 @@
           for (let t = 1; t < c.k; t++) out += ' <n ' + weakMid(c.up[t].info, null);
           out += ' <n ' + weakMid(aInfo, aProps);
         }
-
         // ② 兄弟跳：上索引 a 在 b 前用 +(m)，下索引 a 在 b 后用 -(m)
         const hop = (m === 1 ? (dir === 'up' ? ' + ' : ' - ') : ` ${dir === 'up' ? '+' : '-'}(${m}) `);
-
         if (isSelfMount) {
           // ③ 挂载点即目标自身：兄弟跳直达目标，目标天然在末尾
           out += hop + baseExpr;
@@ -712,9 +708,8 @@
     if (relationMode === 'crossUp') return await crossTreeAnchor('up');
     if (relationMode === 'crossDown') return await crossTreeAnchor('down');
     // auto：前兄弟 → 祖先 → 跨树上索引 → 跨树下索引 → 后代 → 后兄弟，逐级兜底
-    return (await prevAnchor()) || (await vertAnchor()) ||
-           (await crossTreeAnchor('up')) || (await crossTreeAnchor('down')) ||
-           (await descAnchor()) || (await nextAnchor());
+    return (await prevAnchor()) || (await vertAnchor()) || (await crossTreeAnchor('up')) ||
+      (await crossTreeAnchor('down')) || (await descAnchor()) || (await nextAnchor());
   }
 
   /* ---------------- 📍 固定初始锚点（v1.21） ---------------- */
@@ -759,9 +754,12 @@
     const ctx = getTreeContext();
     if (!ctx) return null;
     const A = anchorState;
+
     // 锚点即目标自身 → 无需链路，交给默认逻辑
     if (A.nodeId != null && String(A.nodeId) === String(ctx.self.nodeId)) return null;
-    const parentValid = (info) => info && (info.nodeId == null || p._pid == null || String(info.nodeId) === String(p._pid));
+
+    const parentValid = (info) =>
+      info && (info.nodeId == null || p._pid == null || String(info.nodeId) === String(p._pid));
     const sameId = (x) => x.nodeId != null && String(x.nodeId) === String(A.nodeId);
 
     // ① 锚点是目标的祖先：锚点 >[k] 强mid... >[K] 目标
@@ -804,7 +802,6 @@
 
     // ④ 跨树：a 在锚点祖先链上、b 在目标链上（含目标自身），a/b 互为兄弟
     if (ctx.ancestors.length && !parentValid(ctx.ancestors[0])) return null;
-
     const mounts = [{ info: ctx.self, down: 0 }]; // 目标侧挂载点（含下行层数）
     for (let t = 0; t < ctx.ancestors.length; t++) {
       let contiguous = true;
@@ -814,20 +811,18 @@
       if (!contiguous) break;
       mounts.push({ info: ctx.ancestors[t], down: t + 1 });
     }
-
     const aCands = [{ info: A, up: 0 }, ...A.chain.map((c, i) => ({ info: c, up: i + 1 }))];
     const pairs = [];
     for (const ac of aCands) {
       for (const mt of mounts) {
         if (ac.info.depth !== mt.info.depth) continue;
         if (ac.info.nodeId != null && mt.info.nodeId != null &&
-            String(ac.info.nodeId) === String(mt.info.nodeId)) continue;
+          String(ac.info.nodeId) === String(mt.info.nodeId)) continue;
         pairs.push({ a: ac.info, k: ac.up, b: mt.info, down: mt.down, cost: ac.up + mt.down });
       }
     }
     if (!pairs.length) return null;
     pairs.sort((x, y) => x.cost - y.cost);
-
     for (const pr of pairs.slice(0, 4)) {
       const need = [];
       const seen = new Set();
@@ -836,23 +831,22 @@
         const key = String(info.nodeId);
         if (!seen.has(key)) { seen.add(key); need.push({ nodeId: info.nodeId }); }
       };
-      addNeed(A); addNeed(pr.a); if (pr.down > 0) addNeed(pr.b);
+      addNeed(A);
+      addNeed(pr.a);
+      if (pr.down > 0) addNeed(pr.b);
       const pm = await resolveNodeProps(need);
       const aProps = pr.a.nodeId != null ? pm.get(String(pr.a.nodeId)) || null : null;
       const bProps = pr.down === 0 ? p : (pr.b.nodeId != null ? pm.get(String(pr.b.nodeId)) || null : null);
-
       // _pid 交叉校验兄弟关系；index 缺失无法定间隔/方向 → 换候选
       if (aProps && bProps && aProps._pid != null && bProps._pid != null &&
-          String(aProps._pid) !== String(bProps._pid)) continue;
+        String(aProps._pid) !== String(bProps._pid)) continue;
       if (!(typeof aProps?.index === 'number' && typeof bProps?.index === 'number')) continue;
       const m = Math.abs(bProps.index - aProps.index);
       if (m < 1) continue;
       const dir = aProps.index < bProps.index ? 'up' : 'down'; // up: 锚点侧在前 → +(m)
-
       const sExpr = buildAnchorExpr(A, pm.get(String(A.nodeId)) || null);
       if (!sExpr) continue;
       const weakMid = (info, props) => buildAnchorExpr(info, props) || '*';
-
       // 上行段：锚点 <n 逐级上行至 a（GKD 无多层 <，逐级列出）
       let out = sExpr;
       for (let t = 0; t < pr.k; t++) {
@@ -877,8 +871,7 @@
   // 目标自身是否满足快速查询资格（末尾选择器首表达式须为 id/vid/text 之一，
   // 且 text 不能是正则模式——~= 不在快速查询支持的 6 种结构里）
   function isTargetFqEligible(p) {
-    return !!(p.vid || p.id ||
-      (p.text && String(p.text) !== '' && matchMode.text !== 'regex'));
+    return !!(p.vid || p.id || (p.text && String(p.text) !== '' && matchMode.text !== 'regex'));
   }
 
   // 由节点信息 + 真实属性生成「快速查询收尾选择器」（v1.22）：
@@ -926,12 +919,10 @@
       if (gap < 1) return null;
       return `${at} ${kind === 'prev' ? '-' : '+'}${gap === 1 ? ' ' : `(${gap}) `}${endExpr}`;
     }
-
     if (kind === 'anc') {
       // 直接父级：须与属性表 _pid 交叉校验；父级对不上时退化为任意祖先匹配
       if (dist === 1) {
-        const pv = ctx.ancestors[0] && (p._pid == null ||
-          String(ctx.ancestors[0].nodeId) === String(p._pid));
+        const pv = ctx.ancestors[0] && (p._pid == null || String(ctx.ancestors[0].nodeId) === String(p._pid));
         if (!pv) return `${at} <<n ${endExpr}`;
         return `${at} <n ${endExpr}`;
       }
@@ -942,13 +933,12 @@
       }
       if (!contiguous) return `${at} <<n ${endExpr}`;
       let out = at;
-      for (let t = dist - 2; t >= 0; t--) {
+      for (let t = 0; t <= dist - 2; t++) {
         const mid = buildAnchorExpr(ctx.ancestors[t], null) || '*';
         out += ` <n ${mid}`;
       }
       return out + ` <n ${endExpr}`;
     }
-
     if (kind === 'desc') {
       // 直接子级精确 >；更深层用 >n 任意祖先匹配（后代子树可能被虚拟列表截断，无法保证路径完整）
       return info.depth === ctx.selfDepth + 1 ? `${at} > ${endExpr}` : `${at} >n ${endExpr}`;
@@ -980,13 +970,9 @@
       }
       out += ' <n ' + weakMid(pr.b, pm.get(String(pr.b.nodeId)) || null);
     }
-
     // ② b → a（兄弟跳方向反转：正向 a+(m)b ⇔ 反转 b-(m)a；正向 a-(m)b ⇔ b+(m)a）
-    const hop = pr.m === 1
-      ? (pr.dir === 'up' ? ' - ' : ' + ')
-      : (pr.dir === 'up' ? ` -(${pr.m}) ` : ` +(${pr.m}) `);
+    const hop = pr.m === 1 ? (pr.dir === 'up' ? ' - ' : ' + ') : (pr.dir === 'up' ? ` -(${pr.m}) ` : ` +(${pr.m}) `);
     out += hop;
-
     // ③ a → S（下行 k 代，逐级 >）
     if (pr.k >= 1) {
       out += weakMid(pr.a, pm.get(String(pr.a.nodeId)) || null);
@@ -1012,12 +998,11 @@
   async function tryApplyFqEnd(targetExpr, p) {
     const ctx = getTreeContext();
     if (!ctx) return null;
-    const sameAnchor = (x) => anchorState?.nodeId != null && x.nodeId != null &&
-      String(x.nodeId) === String(anchorState.nodeId);
+    const sameAnchor = (x) =>
+      anchorState?.nodeId != null && x.nodeId != null && String(x.nodeId) === String(anchorState.nodeId);
 
     // ① 📍 固定锚点优先
-    if (anchorState?.nodeId != null &&
-        String(anchorState.nodeId) !== String(ctx.self.nodeId)) {
+    if (anchorState?.nodeId != null && String(anchorState.nodeId) !== String(ctx.self.nodeId)) {
       const A = anchorState;
       const ancIdx = ctx.ancestors.findIndex(sameAnchor);
       if (ancIdx >= 0) {
@@ -1039,7 +1024,6 @@
         const r = await buildFqEndChain(ctx, p, targetExpr, ctx.nextSiblings[ni], 'next', ni + 1);
         if (r) return r;
       }
-
       // 🔧 v1.22.2：📍 为跨树/无关关系 → 先尝试整链反转成 fq 收尾
       // 硬前提：锚点自身含 vid/text/id 可查属性（desc 不行）
       const sProps0 = await readPropsById(A.nodeId);
@@ -1061,7 +1045,7 @@
           for (const mt of mounts) {
             if (ac.info.depth !== mt.info.depth) continue;
             if (ac.info.nodeId != null && mt.info.nodeId != null &&
-                String(ac.info.nodeId) === String(mt.info.nodeId)) continue;
+              String(ac.info.nodeId) === String(mt.info.nodeId)) continue;
             pairs.push({ a: ac.info, k: ac.up, b: mt.info, down: mt.down, cost: ac.up + mt.down });
           }
         }
@@ -1074,13 +1058,15 @@
             const key = String(info.nodeId);
             if (!seen.has(key)) { seen.add(key); need.push({ nodeId: info.nodeId }); }
           };
-          addNeed(A); addNeed(pr.a); if (pr.down > 0) addNeed(pr.b);
+          addNeed(A);
+          addNeed(pr.a);
+          if (pr.down > 0) addNeed(pr.b);
           const pm = await resolveNodeProps(need);
           const aProps = pr.a.nodeId != null ? pm.get(String(pr.a.nodeId)) || null : null;
           const bProps = pr.down === 0 ? p : (pr.b.nodeId != null ? pm.get(String(pr.b.nodeId)) || null : null);
           // _pid / index 交叉校验（同正向），方向存入 pr.dir 供反转 hop 使用
           if (aProps && bProps && aProps._pid != null && bProps._pid != null &&
-              String(aProps._pid) !== String(bProps._pid)) continue;
+            String(aProps._pid) !== String(bProps._pid)) continue;
           if (!(typeof aProps?.index === 'number' && typeof bProps?.index === 'number')) continue;
           const m = Math.abs(bProps.index - aProps.index);
           if (m < 1) continue;
@@ -1112,6 +1098,68 @@
     return null;
   }
 
+  /* ---------------- 🧬 使用 gkd 自生成的 selfrule（v1.22.5） ---------------- */
+  // 开启后 🔆/🔰 生成规则时，matches 直接采用「点击属性表里的规则生成按钮
+  // （td > div > button.n-button）后 gkd 写入剪贴板的 selfrule」文本，
+  // 完全跳过本工具的 🔀/📍/fastQuery 链路构建；截获失败自动回退默认生成。
+  // ⚡ 实现方式：启动时装一次「永久剪贴板探针」——包装 writeText，每次站点
+  // 写入都记录文本+自增序号，并始终转发原函数（剪贴板行为与未装一致）。
+  // 获取时只做：记基线 → 点按钮 → 轮询等"新"写入 → 有就直接返回。
+  // 无临时装拆（旧版每次装/卸与站点异步回调时序竞争的根因），N 次调用均可复用。
+
+  let _cbWrite = { seq: 0, text: null };
+  (function installClipboardSpy() {
+    const clip = navigator.clipboard;
+    if (!clip || typeof clip.writeText !== 'function') return;
+    const orig = clip.writeText.bind(clip);
+    clip.writeText = function (text) {
+      _cbWrite = { seq: _cbWrite.seq + 1, text: String(text) };
+      return orig(text);
+    };
+  })();
+
+  // 在选中节点对应的属性表里找规则生成按钮（td > div > button.n-button）
+  function findSelfRuleBtn() {
+    const sel = getSelectedNodeEl();
+    const nodeId = sel?.dataset?.nodeId ?? null;
+    const tables = [...document.querySelectorAll('table.n-table')];
+    const pick = (tb) =>
+      tb.querySelector('td div > button.n-button') || tb.querySelector('td button.n-button');
+    // 优先：选中节点 _id 匹配的那张属性表
+    if (nodeId != null) {
+      for (const tb of tables) {
+        const p = parseTable(tb);
+        if (p && String(p._id) === String(nodeId)) {
+          const btn = pick(tb);
+          if (btn) return btn;
+        }
+      }
+    }
+    // 兜底：任意属性表里的第一个
+    for (const tb of tables) {
+      const btn = pick(tb);
+      if (btn) return btn;
+    }
+    return null;
+  }
+
+  // 记基线 → 点击按钮 → 轮询等一条"新"写入 → 有就直接返回该文本
+  async function getSelfRuleMatches() {
+    const btn = findSelfRuleBtn();
+    if (!btn) {
+      toast('❌ 未找到属性表里的规则生成按钮（button.n-button），回退默认生成', 'err');
+      return null;
+    }
+    btn.click();
+    const t0 = Date.now();
+    while (Date.now() - t0 < 1000) {
+      if (_cbWrite.text) return _cbWrite.text;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    toast('❌ 截获 selfrule 失败，回退默认生成', 'err');
+    return null;
+  }
+
   /* ---------------- 生成 matches ---------------- */
 
   async function buildMatches(p) {
@@ -1133,7 +1181,6 @@
 
     if (p.vid) parts.push(`[vid="${esc(p.vid)}"]`);
     else if (p.id) parts.push(`[id="${esc(p.id)}"]`);
-
     // text / desc 按当前模式生成
     if (p.text != null) parts.push(buildMatchExpr('text', p.text, matchMode.text));
     if (p.desc != null) parts.push(buildMatchExpr('desc', p.desc, matchMode.desc));
@@ -1149,10 +1196,10 @@
     const base = (shortName ? shortName : '') + parts.join('');
 
     // 弱目标（无 vid/id/非空 text/desc）表达式 —— 默认精简形态：
-    //   节点名 + visibleToUser（按属性表实值，v1.17 修正不再无脑追加 true；
-    //   快照中不可见的置灰节点实值为 false，此时不加约束，clickNode 屏外也能点）
-    //   + [text=""]/[desc=""]（实值为空串时，仍是有效约束）
-    //   + [index=n]（父内序号，兄弟间的主区分手段）
+    // 节点名 + visibleToUser（按属性表实值，v1.17 修正不再无脑追加 true；
+    // 快照中不可见的置灰节点实值为 false，此时不加约束，clickNode 屏外也能点）
+    // + [text=""]/[desc=""]（实值为空串时，仍是有效约束）
+    // + [index=n]（父内序号，兄弟间的主区分手段）
     // 📐 几何约束（v1.18 三重门槛，保持精简）：
     //   ① 🔱 菜单开关开启（默认关闭）；② 存在同名兄弟（hasSameNameSibling 同步
     //   扫 DOM 判定真歧义，无同名兄弟时 index 已足够区分，一条都不加）；
@@ -1173,7 +1220,6 @@
       if (typeof p.index === 'number') extra.push(`[index=${p.index}]`);
       if (p.text === '') extra.push('[text=""]');
       if (p.desc === '') extra.push('[desc=""]');
-
       let geoAdded = false;
       if (geoOn && hasSameNameSibling()) {
         if (typeof p.width === 'number') { extra.push(`[width=${p.width}]`); geoAdded = true; }
@@ -1185,7 +1231,6 @@
           console.info('[GKD规则生成器] 检测到同名兄弟歧义，已附加几何约束（width/height 优先，left/top 仅兜底）；几何值随设备分辨率/旋转变化，跨设备使用请手动删改');
         }
       }
-
       if (p.visibleToUser === false) {
         console.warn('[GKD规则生成器] 目标节点 visibleToUser=false（快照中不可见），已省略该约束；若规则不触发请改用 clickNode 或重新截图');
       }
@@ -1196,7 +1241,7 @@
 
     // ⚡ v1.22（最高优先）：fastQuery 开启且目标不可快速查询（弱目标 / 仅 desc /
     // text 正则模式）时，不再强制目标在末尾，而是反转链路：
-    //   @目标 在前 + 可快速查询的亲属锚点（不写节点名，首表达式为 6 种 fq 类型之一）收尾
+    // @目标 在前 + 可快速查询的亲属锚点（不写节点名，首表达式为 6 种 fq 类型之一）收尾
     // 📍 固定锚点优先充当收尾锚点；🔧 v1.22.2：📍 为跨树/无关关系时先尝试
     // 整链反转（buildFqCrossChain），反转不可行才交还下方 📍 主流程的跨树分支
     if (fastQueryOn && !isTargetFqEligible(p)) {
@@ -1242,27 +1287,35 @@
   /* ---------------- 组装规则 JSON ---------------- */
 
   async function buildRule() {
-    const p = readProps();
-    // ⚡ 必须在锚点解析（会点击换选）之前读取目标属性
+    const p = readProps(); // ⚡ 必须在锚点解析（会点击换选）之前读取目标属性
     if (!p) return null;
     const activityId = getActivityId();
     const label = p.text || p.desc || (p.name ? p.name.split('.').pop() : '目标控件');
+
+    // 🧬 开启时 matches 直接使用 gkd 自生成的 selfrule（不经过 🔀/📍/fastQuery 逻辑）；
+    // 截获失败（找不到按钮/无新写入）自动回退本工具默认生成
+    const matchesExpr = (useSelfRule ? (await getSelfRuleMatches()) : null) ?? (await buildMatches(p));
+
+    // matches 值改用单引号包裹：JSON.stringify 强制双引号，故先放占位符再替换
+    // 选择器表达式自身含单引号时无法安全包裹，回退双引号（仍是合法 JSON）
+    const M_PH = '__GKD_MATCHES_PH__';
+    const useSingle = !matchesExpr.includes("'");
+    const patchMatches = (json) =>
+      json.replace(`"${M_PH}"`, useSingle ? `'${matchesExpr}'` : JSON.stringify(matchesExpr));
 
     // rules[0] —— 内层规则项，两种输出模式共用
     const ruleItem = {
       key: 0,
       name: `关闭${label}`,
-      matches: [await buildMatches(p)],
+      matches: [M_PH],
     };
     if (activityId) {
       ruleItem.activityIds = [activityId];
     }
-
     // ⚡ 仅生成 rule 项：只输出上面那个内层对象，适合粘贴进已有规则的 rules 数组里
     if (ruleOnlyOn) {
-      return JSON.stringify(ruleItem, null, 2);
+      return patchMatches(JSON.stringify(ruleItem, null, 2));
     }
-
     // 完整规则组
     const rule = {
       key: 0,
@@ -1273,10 +1326,8 @@
     // fastQuery 开启时，输出在 actionMaximum 下方（规则组层级）
     if (fastQueryOn) rule.fastQuery = true;
     rule.rules = [ruleItem];
-    return JSON.stringify(rule, null, 2);
+    return patchMatches(JSON.stringify(rule, null, 2));
   }
-
-  /* ---------------- 复制到剪贴板 ---------------- */
 
   async function copyText(text) {
     try {
@@ -1413,8 +1464,7 @@
       'position:fixed', 'z-index:9999998', 'min-width:230px',
       'max-height:calc(100vh - 16px)', 'overflow-y:auto', 'overflow-x:hidden',
       'background:#fff', 'border:1px solid #e0e0e6', 'border-radius:6px',
-      'box-shadow:0 4px 16px rgba(0,0,0,.15)', 'padding:4px',
-      'font-size:13px', 'color:#333',
+      'box-shadow:0 4px 16px rgba(0,0,0,.15)', 'padding:4px', 'font-size:13px', 'color:#333',
     ].join(';');
 
     const title = document.createElement('div');
@@ -1432,9 +1482,7 @@
       () => {
         fastQueryOn = !fastQueryOn;
         saveMode();
-        toast(fastQueryOn
-          ? '✅ fastQuery 开启：可快速查询的目标不写节点名；目标不可查时自动反转链路（@目标在前、fq 锚点收尾；📍 已设置时优先用 📍，跨树链亦可反转）'
-          : '✅ fastQuery 关闭：不含 fastQuery，所有目标写节点名');
+        toast(fastQueryOn ? '✅ fastQuery 开启：可快速查询的目标不写节点名；目标不可查时自动反转链路（@目标在前、fq 锚点收尾；📍 已设置时优先用 📍，跨树链亦可反转）' : '✅ fastQuery 关闭：不含 fastQuery，所有目标写节点名');
         removeMenu();
         updateModeBtnTitle();
         refreshAll();
@@ -1449,6 +1497,23 @@
         ruleOnlyOn = !ruleOnlyOn;
         saveMode();
         toast(ruleOnlyOn ? '✅ 仅生成 rule 项：输出内层规则对象（key/name/matches/activityIds）' : '✅ 完整规则组：输出含 actionMaximum/fastQuery/rules 的完整对象');
+        removeMenu();
+        updateModeBtnTitle();
+        refreshAll();
+      }
+    ));
+
+    // 🧬 使用 gkd 自生成的 selfrule 开关（v1.22.5）
+    menu.appendChild(menuToggleRow(
+      '🧬 使用 gkd 自生成 selfrule', useSelfRule,
+      '✅ 开启（matches 用属性表按钮生成的规则）', '⛔ 关闭（由本工具生成）',
+      () => {
+        useSelfRule = !useSelfRule;
+        saveMode();
+        updateSelfRuleBtnVisual(); // 同步面板内 🧬 按钮高亮
+        toast(useSelfRule
+          ? '✅ 已开启：🔆/🔰 的 matches 将通过点击属性表按钮截获 gkd 自生成的 selfrule（不经过 🔀/📍；截获失败自动回退本工具生成）'
+          : '✅ 已关闭：matches 恢复由本工具生成');
         removeMenu();
         updateModeBtnTitle();
         refreshAll();
@@ -1530,7 +1595,7 @@
     const t = MODES.find(m => m.key === matchMode.text);
     const d = MODES.find(m => m.key === matchMode.desc);
     const r = RELATION_MODES.find(m => m.key === relationMode);
-    btn.title = `生成器设置（点击切换）\ntext: ${t.label} — ${t.tip}\ndesc: ${d.label} — ${d.tip}\nfastQuery: ${fastQueryOn ? '开启（可查目标不写节点名；目标不可查时 @目标在前、fq 锚点收尾；📍 已设置时优先用 📍，跨树链亦可反转）' : '关闭（写节点名）'}\n仅生成 rule 项: ${ruleOnlyOn ? '开启（只输出 rules[0]）' : '关闭（完整规则组）'}\n弱目标几何约束: ${geoOn ? '开启（仅同名兄弟歧义时加 width/height）' : '关闭（精简）'}\n关系锚点: ${r.label} — ${r.tip}\n📍 初始锚点: ${anchorState ? `已设置（${anchorState.tail || anchorState.name || anchorState.nodeId}）` : '未设置（点击左侧树节点后按 📍 固定）'}`;
+    btn.title = `生成器设置（点击切换）\ntext: ${t.label} — ${t.tip}\ndesc: ${d.label} — ${d.tip}\nfastQuery: ${fastQueryOn ? '开启（可查目标不写节点名；目标不可查时 @目标在前、fq 锚点收尾；📍 已设置时优先用 📍，跨树链亦可反转）' : '关闭（写节点名）'}\n仅生成 rule 项: ${ruleOnlyOn ? '开启（只输出 rules[0]）' : '关闭（完整规则组）'}\nselfrule: ${useSelfRule ? '开启（matches 直接用 gkd 自生成规则）' : '关闭'}\n弱目标几何约束: ${geoOn ? '开启（仅同名兄弟歧义时加 width/height）' : '关闭（精简）'}\n关系锚点: ${r.label} — ${r.tip}\n📍 初始锚点: ${anchorState ? `已设置（${anchorState.tail || anchorState.name || anchorState.nodeId}）` : '未设置（点击左侧树节点后按 📍 固定）'}`;
   }
 
   /* ---------------- 💭 教程面板 ---------------- */
@@ -1565,9 +1630,7 @@
     // 遮罩
     const mask = document.createElement('div');
     mask.id = 'gkd-help-mask';
-    mask.style.cssText = [
-      'position:fixed', 'inset:0', 'background:rgba(0,0,0,.35)', 'z-index:9999990',
-    ].join(';');
+    mask.style.cssText = ['position:fixed', 'inset:0', 'background:rgba(0,0,0,.35)', 'z-index:9999990'].join(';');
     mask.addEventListener('click', removeHelp);
     document.body.appendChild(mask);
 
@@ -1579,18 +1642,14 @@
       'left:50%', 'transform:translateX(-50%)',
       `width:min(${CFG.panelMaxWidth}px,${CFG.vwPercent}vw)`,
       `max-height:${CFG.panelMaxHeightVh}vh`,
-      'background:#fff', 'border-radius:10px',
-      'box-shadow:0 8px 32px rgba(0,0,0,.28)',
+      'background:#fff', 'border-radius:10px', 'box-shadow:0 8px 32px rgba(0,0,0,.28)',
       'display:flex', 'flex-direction:column',
       'font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif',
     ].join(';');
 
     // 标题栏
     const head = document.createElement('div');
-    head.style.cssText = [
-      'padding:16px 20px', 'border-bottom:1px solid #eee',
-      'display:flex', 'align-items:center', 'justify-content:space-between', 'flex:none',
-    ].join(';');
+    head.style.cssText = ['padding:16px 20px', 'border-bottom:1px solid #eee', 'display:flex', 'align-items:center', 'justify-content:space-between', 'flex:none'].join(';');
     head.innerHTML = `
       <div style="font-weight:600;font-size:${CFG.fsTitle}px;color:#333;">📖 GKD 选择器 · 匹配符与参数教程</div>
       <div style="display:flex;gap:14px;align-items:center;">
@@ -1651,10 +1710,14 @@
         <tr><td style="${tdStyle}"><code style="${codeStyle}">&lt;&lt;n</code></td><td style="${tdStyle}">A 是 B 的任意层级后代（B 是 A 的祖先）</td><td style="${tdStyle}"><code style="${codeStyle}">@[text='跳过'] &lt;&lt;n [vid='root']</code></td></tr>
       </table>
       <p>支持 <code style="${codeStyle}">&gt;n</code>（任意祖先）、<code style="${codeStyle}">&gt;3</code>（精确跨 3 代）、<code style="${codeStyle}">+(2,4,6)</code> 元组等写法，参考 CSS <code style="${codeStyle}">:nth(an+b)</code>。四种关系的官方语义（以 A 在左、B 在右）：</p>
-      <pre style="${preStyle}">A +(an+b) B : A.index = B.index-(an+b) → A 在 B 前面 A -(an+b) B : A.index = B.index+(an+b) → A 在 B 后面 A &gt; B : A 是 B 的祖先 A &lt; B : A 是 B 的直接子节点（且 A.index=0）</pre>
+      <pre style="${preStyle}">A +(an+b) B : A.index = B.index-(an+b) → A 在 B 前面
+A -(an+b) B : A.index = B.index+(an+b) → A 在 B 后面
+A &gt; B : A 是 B 的祖先
+A &lt; B : A 是 B 的直接子节点（且 A.index=0）</pre>
       <p>🔀 本脚本 🔱 菜单的"关系锚点"会自动为目标附加父/兄弟/祖先/后代锚点，生成策略：<b>目标属性选择器恒定在末尾</b>（<code style="${codeStyle}">锚点 +(n) 目标</code> / <code style="${codeStyle}">锚点 -(n) 目标</code> / <code style="${codeStyle}">锚点 &gt; 强中间 &gt;K 目标</code> / <code style="${codeStyle}">锚点 &lt;n·&lt;&lt;n 目标</code>），作为快速查询入口，因此无需 <code style="${codeStyle}">@</code> 标记；锚点属性通过模拟点击读取真实属性表精确归属（vid/desc/text 不再靠猜），读取失败时回退 <code style="${codeStyle}">[vid='x' || text='x' || desc='x']</code> 兜底；含强属性的中间节点保留，仅类名/[childCount] 的弱中间节点折叠为精确深度 <code style="${codeStyle}">&gt;K</code>。</p>
       <p>🔀 v1.15 新增<b>跨树追踪锚点</b>（拆分为上/下索引两方向），专治目标及其祖先全无特征、但旁支子树里存在强节点的场景：设目标在 b 的子树中，强节点在 b 的兄 a 的子树（上索引）或弟 c 的子树（下索引）里，生成——</p>
-      <pre style="${preStyle}">上索引（兄侧）：[强锚点] &lt;n 弱中间… &lt;n a +(m) 挂载b &gt;K 目标 下索引（弟侧）：[强锚点] &lt;n 弱中间… &lt;n c -(m) 挂载b &gt;K 目标</pre>
+      <pre style="${preStyle}">上索引（兄侧）：[强锚点] &lt;n 弱中间… &lt;n a +(m) 挂载b &gt;K 目标
+下索引（弟侧）：[强锚点] &lt;n 弱中间… &lt;n c -(m) 挂载b &gt;K 目标</pre>
       <p>其中 m 为 a/c 与 b 的真实兄弟间隔（中间夹的其它兄弟也计入），上下行代差任意（<code style="${codeStyle}">&lt;n</code> 逐级上行——GKD 无多层 <code style="${codeStyle}">&lt;</code>，不能一个 <code style="${codeStyle}">&lt;n</code> 跨到底 / <code style="${codeStyle}">&gt;K</code> 精确深度下行）；a/b 兄弟关系经点击读取双方 <code style="${codeStyle}">_pid</code>/<code style="${codeStyle}">index</code> 交叉校验，方向不符自动换次优候选；目标恒在末尾，目标自身带 vid/text 时照常享受快速查询，弱目标时 fastQuery 静默回退普通遍历（不报错）。</p>
       <p>📍 <b>v1.21 新增「初始锚点」</b>：在左侧树选中任意节点后点击 📍，该节点被高亮（橙色描边）并固定为链路起点，📍 按钮同时变橙色表示锚点已激活；再次点击 📍 取消。设置后用 🔆/🔰 生成规则时<b>优先</b>以它为锚点索引到当前目标——锚点是目标的祖先/后代/兄弟时直接生成对应链；跨树场景则自动在锚点祖先链与目标祖先链之间寻找同深度兄弟节点对，生成 <code style="${codeStyle}">锚点 &lt;n… a ±(m) b &gt;K 目标</code> 追踪链（同样经 _pid/index 交叉校验）。🔧 v1.22.1 起固定锚点意图为全脚本最高优先：即使 fastQuery 开启、且存在更近的可快速查询亲属，也不会自动搜索顶替 📍 锚点；🔧 v1.22.2 起跨树关系的 📍 链在 fastQuery 开启时会先尝试<b>整链反转</b>（@目标在前、锚点收尾当快速查询入口），反转不可行（锚点无可查属性/配对校验失败）才回退正向链；🔧 v1.22.3 修正了反转链 ③ 段末位与锚点之间漏写 <code style="${codeStyle}">&gt;</code> 关系符的问题。</p>
 
@@ -1674,16 +1737,17 @@
 
       <div style="${hStyle}">6️⃣ 快速查询</div>
       <p>把规则里 <code style="${codeStyle}">fastQuery</code> 设为 <code style="${codeStyle}">true</code> 后，GKD 可以调用系统 API（findAccessibilityNodeInfosByViewId / ByText）直接查找节点，避免遍历整棵树，速度大幅提升。但要满足：<b>末尾属性选择器的第一个表达式</b>属于下面结构之一：</p>
-      <pre style="${preStyle}">[id='abc'] [vid='abc'] [text='abc'] [text^='abc'] [text*='abc'] [text$='abc']</pre>
+      <pre style="${preStyle}">[id='abc']  [vid='abc']  [text='abc']
+[text^='abc']  [text*='abc']  [text$='abc']</pre>
       <p>用 <code style="${codeStyle}">||</code> 连接上述结构也算符合。如果末尾选择器不符合这些格式，fastQuery 会被忽略（自动回退普通遍历，不会报错）。另外 vid/id/text 表达式必须放在 <code style="${codeStyle}">[]</code> 内<b>第一个</b>位置：<code style="${codeStyle}">C[id='x'][childCount=2]</code> ✅、<code style="${codeStyle}">C[childCount=2][id='x']</code> ❎。此外 <code style="${codeStyle}">&lt;&lt;n</code> 链条支持分段快速查询（如 <code style="${codeStyle}">C[id='x'] &lt;&lt;n D</code> 会先快速查 C 再在其子树内搜 D）。注意：快速查询资格只取决于末尾属性选择器，与 <code style="${codeStyle}">@</code> 标记在哪无关——<code style="${codeStyle}">@CheckBox &lt;&lt;n [vid='ll']</code> 照样触发快速查询。</p>
       <p>⚡ <b>v1.22：fastQuery 开启时目标不再强制放末尾</b>。开启 fastQuery 且目标自身不可快速查询（弱目标 / 仅 desc / text 正则模式）时，本工具会自动<b>反转链路</b>：<code style="${codeStyle}">@目标</code> 放在前，以可快速查询的节点收尾（不写节点名，首表达式只用上面 6 种类型），末位选择器即快速查询入口。收尾锚点的选取顺序（🔧 v1.22.1/1.22.2/1.22.3）：<b>未设置 📍 时</b>——自动的最近祖先 → 最近后代 → 最近前/后兄弟；<b>已设置 📍 时</b>——若 📍 锚点是目标的祖先/后代/兄弟且含可查属性，用它收尾；若 📍 锚点是跨树关系，先尝试把 📍 跨树链<b>整链反转</b>（<code style="${codeStyle}">锚点 &lt;n… a ±(m) b &gt;K 目标</code> ⇄ <code style="${codeStyle}">@目标 &lt;n… b ∓(m) a &gt;… [锚点]</code>，关系符逐段互换、末位与锚点间以 <code style="${codeStyle}">&gt;</code> 连接），锚点自身含 vid/text/id 时即可兼得 fastQuery 与 📍 意图；反转不可行才回退正向链（目标收尾，fastQuery 静默忽略）。<b>任何已设 📍 的场景都不会自动搜索顶替</b>。祖先链精确逐级 <code style="${codeStyle}">&lt;n</code>（断链退化为 <code style="${codeStyle}">&lt;&lt;n</code>），后代深层退化为 <code style="${codeStyle}">&gt;n</code>，兄弟用 <code style="${codeStyle}">±(n)</code> 并经属性表 index 复核方向与间隔。</p>
-      <p>💡 本脚本的 🔱 菜单"生成内容"分组里有三个开关：<b>⚡ fastQuery</b>——开启时规则组输出 <code style="${codeStyle}">"fastQuery": true</code>，可快速查询的目标不写节点名，目标不可查时自动反转链路（见上）；关闭时不输出 fastQuery，所有目标写节点名简写。<b>🧩 仅生成 rule 项</b>——开启时只输出内层规则对象（key/name/matches/activityIds），适合直接粘进已有规则的 rules 数组；关闭时输出含 actionMaximum/fastQuery/rules 的完整规则组。<b>📐 弱目标几何约束</b>（v1.18，默认关）——开启后仅当弱目标存在<b>同名兄弟</b>时追加 <code style="${codeStyle}">[width=..][height=..]</code>，w/h 缺失才回退 left/top。🔀 所有关系锚点模式（含跨树上/下索引）与 📍 固定锚点均把目标放在末尾（fastQuery 反转链路时除外）。</p>
+      <p>💡 本脚本的 🔱 菜单"生成内容"分组里有四个开关：<b>⚡ fastQuery</b>——开启时规则组输出 <code style="${codeStyle}">"fastQuery": true</code>，可快速查询的目标不写节点名，目标不可查时自动反转链路（见上）；关闭时不输出 fastQuery，所有目标写节点名简写。<b>🧩 仅生成 rule 项</b>——开启时只输出内层规则对象（key/name/matches/activityIds），适合直接粘进已有规则的 rules 数组；关闭时输出含 actionMaximum/fastQuery/rules 的完整规则组。<b>🧬 使用 gkd 自生成 selfrule</b>（默认关，面板内 🧬 按钮可快速开关，开启时绿色高亮）——开启后 🔆/🔰 生成规则时自动点击属性表里的规则生成按钮，经永久剪贴板探针截获 gkd 写入剪贴板的 selfrule 文本直接用作 matches（不经过 🔀/📍/fastQuery 链路构建）；截获失败自动回退本工具默认生成。<b>📐 弱目标几何约束</b>（v1.18，默认关）——开启后仅当弱目标存在<b>同名兄弟</b>时追加 <code style="${codeStyle}">[width=..][height=..]</code>，w/h 缺失才回退 left/top。🔀 所有关系锚点模式（含跨树上/下索引）与 📍 固定锚点均把目标放在末尾（fastQuery 反转链路时除外）。</p>
 
       <div style="${hStyle}">7️⃣ 实战小技巧</div>
       <ul style="margin:6px 0 10px 24px;padding:0;">
         <li>广告"关闭"按钮文字常变化 → 用 <code style="${codeStyle}">[text*='关闭']</code> 或 <code style="${codeStyle}">[text~='关闭(广告|弹窗)?']</code></li>
         <li>"跳过 X 秒"按钮 → 用 <code style="${codeStyle}">[text~='跳过\\\\s*\\\\d+']</code> 而不是精确匹配</li>
-        <li>节点没有可用属性 → 用父/祖先关系+位置兜底：<code style="${codeStyle}">[vid='ad_root'] &gt; ImageView[index=2]</code>；若全链无特征但旁支子树里有强节点，用 🔱 菜单的 🔀 跨树上/下索引锚点自动生成追踪链，或先选中旁支强节点按 📍 固定为初始锚点再选中目标生成（fq 开启时若锚点含 vid/text/id，还会自动反转成 fq 收尾）</li>
+        <li>节点没有可用属性 → 用父/祖先关系+位置兜底：<code style="${codeStyle}">[vid='ad_root'] &gt; ImageView[index=2]</code>；若全链无特征但旁支子树里有强节点，用 🔱 菜单的 🔀 跨树上/下索引锚点自动生成追踪链，或先选中旁支强节点按 📍 固定为初始锚点再选中目标生成（fq 开启时若锚点含 vid/text/id，还会自动反转成 fq 收尾）；嫌手工配置麻烦可开 🧬 selfrule，直接用 gkd 官方生成的选择器</li>
         <li>目标不可快速查询但附近有 vid/text 节点 → 开着 fastQuery 直接生成即可（未设 📍 时），v1.22 会自动把该邻居放到末尾当快速查询入口（<code style="${codeStyle}">@目标 &lt;n [vid='x']</code> 之类）；但若已设 📍 锚点，生成结果以 📍 为准</li>
         <li>规则越精确越好，避免全局用 <code style="${codeStyle}">[text*='x']</code> 导致误点</li>
       </ul>
@@ -1703,7 +1767,11 @@
         <tr><td style="${tdStyle}"><code style="${codeStyle}">none</code></td><td style="${tdStyle}">什么都不做，仅作匹配标记</td><td style="${tdStyle}">常用于 preKeys 链式规则的"前一步触发标记"，不产生任何点击</td></tr>
       </table>
       <p>典型选择策略：<b>能点进节点就 <code style="${codeStyle}">clickNode</code></b>（不受遮挡/屏幕外影响，最稳）；<b>节点不可点但热区在其范围内（或用 position 偏移到热区）就 <code style="${codeStyle}">clickCenter</code></b>；<b>不需要点任何东西、只做流程标记就 <code style="${codeStyle}">none</code></b>。示例：</p>
-      <pre style="${preStyle}">{ matches: '[vid="ad_container"]', action: 'clickCenter', position: { right: 'width*0.1', top: 'height*0.1' }, // 点容器右上角的关闭热区 }</pre>
+      <pre style="${preStyle}">{
+  matches: '[vid="ad_container"]',
+  action: 'clickCenter',
+  position: { right: 'width*0.1', top: 'height*0.1' }, // 点容器右上角的关闭热区
+}</pre>
 
       <div style="${hStyle}">9️⃣ position 自定义点击位置</div>
       <p><code style="${codeStyle}">position</code> 是一个对象，用来描述自定义点击位置，<b>坐标相对目标节点（不是相对屏幕）</b>，仅在 <code style="${codeStyle}">clickCenter</code>/<code style="${codeStyle}">longClickCenter</code> 时生效；不写 position 时默认点击节点中心。定位属性共 6 个，须<b>水平、垂直各选一个</b>组合使用：</p>
@@ -1715,11 +1783,19 @@
         <tr><td style="${tdStyle}"><code style="${codeStyle}">x</code> / <code style="${codeStyle}">y</code></td><td style="${tdStyle}">屏幕左侧 / 顶部</td><td style="${tdStyle}">距屏幕左/上的距离；小窗或分屏时坐标相对整块屏幕，可能点到应用窗口外</td></tr>
       </table>
       <p>合法组合为 <code style="${codeStyle}">left/right/x</code> 三选一 + <code style="${codeStyle}">top/bottom/y</code> 三选一。值支持数字或字符串（<code style="${codeStyle}">2.5</code> 等价 <code style="${codeStyle}">'2.5'</code>）；字符串还支持数学计算表达式，可直接引用快照属性面板上目标节点的 <code style="${codeStyle}">left/top/right/bottom/width/height</code> 六个属性，以及三个额外变量：<code style="${codeStyle}">random</code>（0-1 随机数，同一表达式内是固定值，所以 <code style="${codeStyle}">'random-random'=0</code>）、<code style="${codeStyle}">screenWidth</code>、<code style="${codeStyle}">screenHeight</code>（实时屏幕宽高，屏幕旋转时跟随变化）。官方四个示例：</p>
-      <pre style="${preStyle}">// 点击目标节点的中心（即不写 position 的默认行为） { left: 'width/2', top: 'height/2' } // 点击目标节点的左上顶点 { left: 0, top: 0 } // 点击目标节点的右上区域（广告卡片右上角"X"的典型写法） { right: 'width*0.1352', top: 'width*0.0852' } // 点击屏幕中心（脱离目标节点，用 x/y） { x: 'screenWidth/2', y: 'screenHeight/2' }</pre>
+      <pre style="${preStyle}">// 点击目标节点的中心（即不写 position 的默认行为）
+{ left: 'width/2', top: 'height/2' }
+// 点击目标节点的左上顶点
+{ left: 0, top: 0 }
+// 点击目标节点的右上区域（广告卡片右上角"X"的典型写法）
+{ right: 'width*0.1352', top: 'width*0.0852' }
+// 点击屏幕中心（脱离目标节点，用 x/y）
+{ x: 'screenWidth/2', y: 'screenHeight/2' }</pre>
       <p>💡 与本工具的联动：生成器命中的常是大容器（如 <code style="${codeStyle}">[vid='ad_root']</code>），而真正的关闭按钮往往在容器的某个角落且本身无特征——此时不必费力选择更深的子节点，直接在 rules 项里追加 <code style="${codeStyle}">action: 'clickCenter'</code> + <code style="${codeStyle}">position: { right: 'width*0.1', top: 'height*0.1' }</code>（按快照里关闭按钮的实际相对位置调整系数）即可命中角落热区。另一类场景是目标卡片 <code style="${codeStyle}">clickable=false</code>、热区在内部子节点上，用 position 精确点热区可绕过不可点限制。本工具新增的 <b>📏 position 生成器</b>（按钮在左侧工具栏 🔱 下方和各面板 🔆 🔰 中间）就是干这个的：点开 📏 出现小面板，把光标移到快照大图目标点上单击，即自动读取悬浮层右下角的归一化坐标（xper/yper）生成 <code style="${codeStyle}">"action": 'clickCenter', "position": { left: 'width*xper', bottom: 'height*yper' }</code> 片段，🖋 复制或 📝 直粘进规则编辑框（已有文本时自动插到 "activityIds" 行之前，夹在 matches 与 activityIds 中间）。</p>
 
       <div style="margin-top:16px;padding:12px 16px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px;font-size:${CFG.fsFootnote}px;color:#555;">
-        📌 以上内容整理自 <a href="https://gkd.li/guide/selector" target="_blank" style="color:#2080F0;">gkd.li/guide/selector</a>、
+        📌 以上内容整理自
+        <a href="https://gkd.li/guide/selector" target="_blank" style="color:#2080F0;">gkd.li/guide/selector</a>、
         <a href="https://gkd.li/guide/optimize" target="_blank" style="color:#2080F0;">gkd.li/guide/optimize</a>、
         <a href="https://gkd.li/guide/example" target="_blank" style="color:#2080F0;">gkd.li/guide/example</a>、
         <a href="https://gkd.li/api/interfaces/RawRuleProps.html" target="_blank" style="color:#2080F0;">RawRuleProps（action 定义）</a>、
@@ -1734,7 +1810,7 @@
   /* ---------------- 📏 position 生成器（面板 aa） ---------------- */
 
   const GEO_PANEL_ID = 'gkd-geo-panel';
-  let positionText = '';      // 最近一次生成的 position 片段
+  let positionText = ''; // 最近一次生成的 position 片段
   let geoDocClickHandler = null;
 
   function removeGeoPanel() {
@@ -1747,9 +1823,8 @@
 
   // 定位快照大图（双选择器兜底）
   function findScreenshotImg() {
-    return document.querySelector('img[class*="max-w-[calc"]')
-      || document.querySelector('body > div:nth-child(1) > div > div:nth-child(2) > img')
-      || null;
+    return document.querySelector('img[class*="max-w-[calc"]') ||
+      document.querySelector('body > div:nth-child(1) > div > div:nth-child(2) > img') || null;
   }
 
   // 从 MiniHoverImg 悬浮层右下角信息块读取 xper / yper
@@ -1786,8 +1861,7 @@
       return;
     }
     const panels = [...document.querySelectorAll('div.app-panel')];
-    const target = panels.find(p => p.innerText.includes('规则静态诊断'))
-      || panels.find(p => p.querySelector(`#${BTN_ID}`));
+    const target = panels.find(p => p.innerText.includes('规则静态诊断')) || panels.find(p => p.querySelector(`#${BTN_ID}`));
     if (!target) {
       toast('❌ 未找到含「规则静态诊断」的 app-panel', 'err');
       return;
@@ -1949,7 +2023,10 @@
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       updateSelState();
-      if (!selReady) { toast('⚠️ 请先在左侧快照树中选中一个节点', 'warn'); return; }
+      if (!selReady) {
+        toast('⚠️ 请先在左侧快照树中选中一个节点', 'warn');
+        return;
+      }
       // 已有锚点 → 再次点击取消
       if (anchorState) {
         anchorState = null;
@@ -1959,7 +2036,10 @@
         return;
       }
       const el = getSelectedNodeEl();
-      if (!el || el.dataset.nodeId == null) { toast('❌ 无法读取选中节点信息', 'err'); return; }
+      if (!el || el.dataset.nodeId == null) {
+        toast('❌ 无法读取选中节点信息', 'err');
+        return;
+      }
       const info = nodeToInfo(el);
       // 快照锚点的祖先链（由近及远），供跨树链路构建使用
       const nodes = [...document.querySelectorAll('.n-tree-node')];
@@ -1969,8 +2049,10 @@
         let expect = info.depth - 1;
         for (let j = i - 1; j >= 0 && expect >= 0; j--) {
           const d = treeNodeDepth(nodes[j]);
-          if (d === expect) { chain.push(nodeToInfo(nodes[j])); expect--; }
-          else if (d < expect) break;
+          if (d === expect) {
+            chain.push(nodeToInfo(nodes[j]));
+            expect--;
+          } else if (d < expect) break;
         }
       }
       anchorState = { ...info, chain };
@@ -1981,18 +2063,58 @@
     return btn;
   }
 
+  /* ---------------- 🧬 selfrule 快速开关按钮（v1.22.5） ---------------- */
+
+  // 切换 🧬 激活态视觉与 title（复用 dataset.activeBg 机制，mouseleave 时恢复高亮）
+  function updateSelfRuleBtnVisual() {
+    document.querySelectorAll(`#${BTN_SELFRULE_ID}`).forEach((btn) => {
+      if (useSelfRule) {
+        btn.dataset.activeBg = '#18a058';
+        btn.style.background = '#18a058';
+        btn.style.color = '#fff';
+        btn.title = '🧬 使用 gkd 自生成 selfrule：已开启（matches 用属性表按钮生成的规则，不经过 🔀/📍；点击关闭）';
+      } else {
+        delete btn.dataset.activeBg;
+        btn.style.background = 'transparent';
+        btn.style.color = '';
+        btn.title = '🧬 使用 gkd 自生成 selfrule：已关闭（matches 由本工具生成；点击开启）';
+      }
+    });
+  }
+
+  function createSelfRuleBtn() {
+    const btn = document.createElement('button');
+    btn.id = BTN_SELFRULE_ID;
+    btn.type = 'button';
+    btn.textContent = '🧬';
+    styleBtn(btn);
+    updateSelfRuleBtnVisual();
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // 纯状态开关，不依赖选中节点，随时可切
+      useSelfRule = !useSelfRule;
+      saveMode();
+      updateSelfRuleBtnVisual();
+      updateModeBtnTitle();
+      toast(useSelfRule
+        ? '🧬 已开启：🔆/🔰 的 matches 将采用 gkd 自生成的 selfrule（截获失败自动回退）'
+        : '🧬 已关闭：matches 恢复由本工具生成');
+    });
+    return btn;
+  }
+
   /* ---------------- 创建按钮 ---------------- */
 
   function styleBtn(btn) {
     btn.style.cssText = [
       'width:36px', 'height:36px', 'border:none', 'background:transparent',
       'font-size:18px', 'line-height:1', 'cursor:pointer', 'border-radius:4px',
-      'opacity:.85', 'transition:opacity .2s, background .2s', 'padding:0', 'flex:none',
-      'display:inline-flex', 'align-items:center', 'justify-content:center',
+      'opacity:.85', 'transition:opacity .2s, background .2s', 'padding:0',
+      'flex:none', 'display:inline-flex', 'align-items:center', 'justify-content:center',
       'user-select:none', 'margin-left:0',
     ].join(';');
     btn.addEventListener('mouseenter', () => { if (!btn.disabled) btn.style.background = '#f3f3f5'; });
-    // mouseleave 尊重激活态底色（📍 锚点激活时保持橙色）
+    // mouseleave 尊重激活态底色（📍 锚点橙色 / 🧬 selfrule 绿色激活时保持）
     btn.addEventListener('mouseleave', () => { btn.style.background = btn.dataset.activeBg || 'transparent'; });
     return btn;
   }
@@ -2142,9 +2264,9 @@
   // 🔆/🔰/📏 的可用性由同一个 selReady 变量一次循环统一设置——不存在
   // 各按钮各自检测、互相覆盖的问题。❌ 仍按面板内是否有编辑框判定。
   // ⚡ v1.21：📍 纳入统一管理；锚点高亮随虚拟列表重渲染自动补挂
+  // ⚡ v1.22.5：🧬 是纯状态开关，不依赖选中节点，不参与 selReady 灰化，仅同步视觉
   function refreshAll() {
     updateSelState(); // 唯一一次读取选中状态
-
     // 🔆 / 🔰 / 📏 / 📍 —— 生成/锚点按钮统一由 selReady 决定可用性
     document.querySelectorAll(`#${BTN_ID}, #${BTN_PASTE_ID}, #${BTN_GEO_ID}, #${BTN_ANCHOR_ID}`).forEach((btn) => {
       btn.disabled = !selReady;
@@ -2152,9 +2274,9 @@
       btn.style.cursor = selReady ? 'pointer' : 'not-allowed';
     });
     updateModeBtnTitle();
-    applyAnchorHighlight();   // 虚拟列表重渲染后补挂锚点高亮
-    updateAnchorBtnVisual();  // 同步 📍 激活态视觉与 title
-
+    applyAnchorHighlight(); // 虚拟列表重渲染后补挂锚点高亮
+    updateAnchorBtnVisual(); // 同步 📍 激活态视觉与 title
+    updateSelfRuleBtnVisual(); // 同步 🧬 激活态视觉与 title（面板重建后高亮不丢）
     // ❌ 的可用性取决于其所在面板内是否有编辑框（与选中状态无关）
     document.querySelectorAll(`#${BTN_CLEAR_ID}`).forEach((btn) => {
       const panel = btn.closest('div.app-panel');
@@ -2166,19 +2288,16 @@
   }
 
   /* ---------------- 注入位置 1：左侧竖排工具栏 ---------------- */
-
   // 在 🔆 下方依次追加 🔱 📏 📍 💭；工具栏是纵向排列
   function injectSidebar() {
     const bar = document.querySelector('div[class*="--svg-h:24px"]');
     if (!bar) return;
-
     // 🔆
     let copyBtn = bar.querySelector(`#${BTN_ID}`);
     if (!copyBtn) {
       copyBtn = createCopyBtn();
       bar.appendChild(copyBtn);
     }
-
     // 🔱 —— 放在 🔆 下方（后插入即在其后）
     let modeBtn = bar.querySelector(`#${BTN_MODE_ID}`);
     if (!modeBtn) {
@@ -2187,7 +2306,6 @@
     } else if (modeBtn.previousElementSibling !== copyBtn) {
       copyBtn.after(modeBtn);
     }
-
     // 📏 —— 放在 🔱 下方、📍 上方
     let geoBtn = bar.querySelector(`#${BTN_GEO_ID}`);
     if (!geoBtn) {
@@ -2196,7 +2314,6 @@
     } else if (geoBtn.previousElementSibling !== modeBtn) {
       modeBtn.after(geoBtn);
     }
-
     // 📍 —— 放在 📏 下方、💭 上方（v1.21）
     let anchorBtn = bar.querySelector(`#${BTN_ANCHOR_ID}`);
     if (!anchorBtn) {
@@ -2205,7 +2322,6 @@
     } else if (anchorBtn.previousElementSibling !== geoBtn) {
       geoBtn.after(anchorBtn);
     }
-
     // 💭 —— 放在 📍 下方
     let helpBtn = bar.querySelector(`#${BTN_HELP_ID}`);
     if (!helpBtn) {
@@ -2216,18 +2332,20 @@
     }
   }
 
-  /* ---------------- 注入位置 2：app-panel 内 n-tag 右侧（🔆 + 📏 + 🔰 + ❌） ---------------- */
+  /* ---------------- 注入位置 2：app-panel 内 n-tag 右侧（🔆 + 📏 + 🧬 + 🔰 + ❌） ---------------- */
 
   function injectAppPanels() {
     document.querySelectorAll('div.app-panel').forEach((panel) => {
       const tag = panel.querySelector('div.n-tag');
       const copyBtn = panel.querySelector(`#${BTN_ID}`);
       const geoBtn = panel.querySelector(`#${BTN_GEO_ID}`);
+      const selfRuleBtn = panel.querySelector(`#${BTN_SELFRULE_ID}`);
       const pasteBtn = panel.querySelector(`#${BTN_PASTE_ID}`);
       const clearBtn = panel.querySelector(`#${BTN_CLEAR_ID}`);
       if (!tag) {
         copyBtn?.remove();
         geoBtn?.remove();
+        selfRuleBtn?.remove();
         pasteBtn?.remove();
         clearBtn?.remove();
         return;
@@ -2238,19 +2356,26 @@
       } else if (copyBtn.previousElementSibling !== tag) {
         tag.after(copyBtn);
       }
-      // 📏 —— 放在 🔆 与 🔰 中间
+      // 📏 —— 放在 🔆 与 🧬 中间
       const copyEl = panel.querySelector(`#${BTN_ID}`);
       if (!geoBtn) {
         copyEl.after(createGeoBtn());
       } else if (geoBtn.previousElementSibling !== copyEl) {
         copyEl.after(geoBtn);
       }
-      // 🔰 —— 放在 📏 右侧
+      // 🧬 —— 放在 📏 与 🔰 中间（v1.22.5）
       const geoEl = panel.querySelector(`#${BTN_GEO_ID}`);
+      if (!selfRuleBtn) {
+        geoEl.after(createSelfRuleBtn());
+      } else if (selfRuleBtn.previousElementSibling !== geoEl) {
+        geoEl.after(selfRuleBtn);
+      }
+      // 🔰 —— 放在 🧬 右侧（v1.22.5：原为 📏 之后，插入 🧬 后改为 🧬 之后，保持顺序 🔆 📏 🧬 🔰 ❌）
+      const selfRuleEl = panel.querySelector(`#${BTN_SELFRULE_ID}`);
       if (!pasteBtn) {
-        geoEl.after(createPasteBtn());
-      } else if (pasteBtn.previousElementSibling !== geoEl) {
-        geoEl.after(pasteBtn);
+        selfRuleEl.after(createPasteBtn());
+      } else if (pasteBtn.previousElementSibling !== selfRuleEl) {
+        selfRuleEl.after(pasteBtn);
       }
       // ❌ —— 放在 🔰 右侧
       const pasteEl = panel.querySelector(`#${BTN_PASTE_ID}`);
@@ -2282,7 +2407,6 @@
   }
 
   /* ---------------- 状态同步触发点 ---------------- */
-
   // 点击树节点 / 快照图 / 属性表区域后，属性表是异步渲染的，
   // 延迟补刷两次，保证 selReady（按钮可用性）必然跟上真实选中状态，
   // 不会出现"已选中但按钮仍是灰色"或"已取消选中但按钮仍亮着"的错乱
@@ -2295,14 +2419,12 @@
   }, true);
 
   /* ---------------- 点击其他区域关闭菜单 ---------------- */
-
   document.addEventListener('click', (e) => {
     const menu = document.getElementById('gkd-mode-menu');
     if (menu && !menu.contains(e.target) && !e.target.closest(`#${BTN_MODE_ID}`)) {
       removeMenu();
     }
   });
-
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       removeMenu();
@@ -2312,19 +2434,14 @@
   });
 
   /* ---------------- 启动（SPA 页面可能延迟渲染） ---------------- */
-
-  loadMode(); // 启动时读取记忆的匹配模式 + fastQuery + ruleOnly + relation + geo 状态
-
+  loadMode(); // 启动时读取记忆的匹配模式 + fastQuery + ruleOnly + relation + geo + selfRule 状态
   const boot = () => {
     // 📍 锚点高亮样式（v1.21）
     const hl = document.createElement('style');
     hl.textContent = `.${ANCHOR_HL_CLS}{box-shadow:inset 0 0 0 2px #f0a020;border-radius:4px;}`;
     document.head.appendChild(hl);
     injectAll();
-    new MutationObserver(() => scheduleInject()).observe(document.body, {
-      childList: true, subtree: true,
-    });
+    new MutationObserver(() => scheduleInject()).observe(document.body, { childList: true, subtree: true });
   };
-
   boot();
 })();
